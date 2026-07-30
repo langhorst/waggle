@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -33,6 +34,17 @@ const (
 	// draining.
 	StatusPaused Status = "PAUSED"
 )
+
+// Rejection is a deliberate, application-level rejection raised by a filter
+// or transformer script (response.reject in the script API): processing
+// stops, the message lands in the Invalid Message Channel, and in
+// destination-ACK mode the source receives exactly this code and text.
+type Rejection struct {
+	Code string // MSA-1 style: usually "AR" or "AE"
+	Text string
+}
+
+func (r *Rejection) Error() string { return fmt.Sprintf("rejected (%s): %s", r.Code, r.Text) }
 
 // FilterFunc is a Message Filter step: false drops the message (state
 // FILTERED, retained). An error sends the message to the Invalid Message
@@ -273,7 +285,7 @@ func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDe
 		keep, err := c.Filter(m)
 		if err != nil {
 			c.fail(ctx, m, fmt.Sprintf("filter: %v", err))
-			return adapter.AckDecision{Code: "AE", Text: err.Error()}
+			return decisionForError(err)
 		}
 		if !keep {
 			m.State = message.StateFiltered
@@ -286,7 +298,7 @@ func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDe
 	for i, translate := range c.Translate {
 		if err := translate(m); err != nil {
 			c.fail(ctx, m, fmt.Sprintf("translator %d: %v", i+1, err))
-			return adapter.AckDecision{Code: "AE", Text: err.Error()}
+			return decisionForError(err)
 		}
 	}
 	outType := c.transformedType(m)
@@ -299,19 +311,38 @@ func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDe
 
 	// Recipient List fan-out.
 	decision := adapter.AckDecision{Code: "AA"}
+	// A channel-level script may have set an explicit ACK without stopping
+	// processing (response.setAck).
+	if m.AckCode != "" {
+		decision = adapter.AckDecision{Code: m.AckCode, Text: m.AckText}
+	}
 	for _, d := range c.Destinations {
 		if err := c.sendTo(ctx, d, m); err != nil {
 			log.Warn("destination delivery failed", "destination", d.ID, "error", err)
 			if d.WaitForAck && decision.Code == "AA" {
-				code := "AE"
-				if adapter.IsPermanent(err) {
-					code = "AR"
+				var rej *Rejection
+				switch {
+				case errors.As(err, &rej):
+					decision = adapter.AckDecision{Code: rej.Code, Text: rej.Text}
+				case adapter.IsPermanent(err):
+					decision = adapter.AckDecision{Code: "AR", Text: fmt.Sprintf("destination %s: %v", d.ID, err)}
+				default:
+					decision = adapter.AckDecision{Code: "AE", Text: fmt.Sprintf("destination %s: %v", d.ID, err)}
 				}
-				decision = adapter.AckDecision{Code: code, Text: fmt.Sprintf("destination %s: %v", d.ID, err)}
 			}
 		}
 	}
 	return decision
+}
+
+// decisionForError maps a pipeline error to the source ACK: script
+// rejections carry their own code and text, anything else is AE.
+func decisionForError(err error) adapter.AckDecision {
+	var rej *Rejection
+	if errors.As(err, &rej) {
+		return adapter.AckDecision{Code: rej.Code, Text: rej.Text}
+	}
+	return adapter.AckDecision{Code: "AE", Text: err.Error()}
 }
 
 // sendTo runs one destination's chain: filter, translators, serialize,

@@ -20,6 +20,7 @@ import (
 
 	"github.com/langhorst/integration-channel/internal/config"
 	"github.com/langhorst/integration-channel/internal/engine"
+	"github.com/langhorst/integration-channel/internal/script"
 	"github.com/langhorst/integration-channel/internal/store"
 
 	// Register the built-in adapters and format modules.
@@ -79,7 +80,10 @@ func runDaemon(args []string) int {
 	}
 	defer st.Close()
 
-	eng := engine.New(engine.Options{Log: log, Store: st})
+	scripts := script.New(script.Options{HotReload: cfg.HotReload, Log: log})
+	defer scripts.Close()
+
+	eng := engine.New(engine.Options{Log: log, Store: st, Scripts: scripts})
 	for _, ch := range channels {
 		if err := eng.LoadChannel(ch); err != nil {
 			log.Error("loading channel", "channel", ch.ID, "error", err)
