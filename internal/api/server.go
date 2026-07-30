@@ -31,9 +31,7 @@ type Server struct {
 	// ScriptsRoot confines script file access: only files under this
 	// directory are readable/writable via the API.
 	ScriptsRoot string
-	Log         *slog.Logger
-	// Web, when set, serves everything outside /api (the embedded web UI).
-	Web http.Handler
+	Log *slog.Logger
 
 	started time.Time
 }
@@ -65,17 +63,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	mux.HandleFunc("GET /api/channels/{id}/events", s.handleEvents)
 
-	if s.Web != nil {
-		mux.Handle("/", s.Web)
-	} else {
-		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/" {
-				http.NotFound(w, r)
-				return
-			}
-			http.Redirect(w, r, "/api/status", http.StatusFound)
-		})
-	}
+	s.registerWebUI(mux)
 	return mux
 }
 

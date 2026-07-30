@@ -211,7 +211,10 @@ func (s *Store) DeadLetters(ctx context.Context, channelID string, limit int) ([
 	return out, rows.Err()
 }
 
-// MessageCounts returns per-state message counts for a channel.
+// MessageCounts returns per-state counts for a channel. Pipeline-level
+// states come from the messages table; SENT and ERROR additionally include
+// per-destination outcomes (a message's pipeline state stops at TRANSFORMED
+// — delivery success and dead-lettering are recorded per destination).
 func (s *Store) MessageCounts(ctx context.Context, channelID string) (map[message.State]int, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT state, COUNT(*) FROM messages WHERE channel_id = ? GROUP BY state`, channelID)
@@ -228,7 +231,29 @@ func (s *Store) MessageCounts(ctx context.Context, channelID string) (map[messag
 		}
 		out[message.State(state)] = n
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	destRows, err := s.db.QueryContext(ctx, `
+		SELECT d.state, COUNT(*)
+		FROM message_destinations d
+		JOIN messages m ON m.id = d.message_id
+		WHERE m.channel_id = ? AND d.state IN ('SENT', 'ERROR')
+		GROUP BY d.state`, channelID)
+	if err != nil {
+		return nil, fmt.Errorf("store: destination counts: %w", err)
+	}
+	defer destRows.Close()
+	for destRows.Next() {
+		var state string
+		var n int
+		if err := destRows.Scan(&state, &n); err != nil {
+			return nil, err
+		}
+		out[message.State(state)] += n
+	}
+	return out, destRows.Err()
 }
 
 // NewReplay clones a stored message into a fresh pipeline-ready Message:

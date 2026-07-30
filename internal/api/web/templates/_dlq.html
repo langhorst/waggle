@@ -1,0 +1,39 @@
+{{define "_dlq.html"}}
+<div class="relative overflow-x-auto shadow-md sm:rounded-lg">
+  <table class="w-full text-sm text-left text-gray-500 dark:text-gray-400">
+    <thead class="text-xs text-gray-700 uppercase bg-gray-100 dark:bg-gray-700 dark:text-gray-400">
+      <tr>
+        <th class="px-6 py-3">Message</th>
+        <th class="px-6 py-3">Destination</th>
+        <th class="px-6 py-3 text-right">Attempts</th>
+        <th class="px-6 py-3">Last error</th>
+        <th class="px-6 py-3">Received</th>
+        <th class="px-6 py-3">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{$channel := .ChannelID}}
+      {{range .Entries}}
+      <tr class="bg-white border-b dark:bg-gray-800 dark:border-gray-700">
+        <td class="px-6 py-3 font-medium">
+          <a href="/messages/{{.ID}}" class="text-blue-600 hover:underline dark:text-blue-400">#{{.ID}}</a>
+        </td>
+        <td class="px-6 py-3">{{.Destination.DestinationID}}</td>
+        <td class="px-6 py-3 text-right">{{.Destination.Attempts}}</td>
+        <td class="px-6 py-3 text-xs text-red-600 dark:text-red-400">{{.Destination.LastError}}</td>
+        <td class="px-6 py-3 text-xs whitespace-nowrap">{{timefmt .ReceivedAt}}</td>
+        <td class="px-6 py-3">
+          <button hx-post="/ui/dlq/{{.ID}}/{{.Destination.DestinationID}}/requeue?channel={{$channel}}"
+                  hx-target="#dlq"
+            class="text-white bg-blue-700 hover:bg-blue-800 font-medium rounded-lg text-xs px-3 py-1.5 dark:bg-blue-600 dark:hover:bg-blue-700">
+            Requeue
+          </button>
+        </td>
+      </tr>
+      {{else}}
+      <tr class="bg-white dark:bg-gray-800"><td colspan="6" class="px-6 py-4 text-center">dead letter queue is empty 🎉</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}

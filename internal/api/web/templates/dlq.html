@@ -1,0 +1,12 @@
+{{define "content"}}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Dead Letters — {{.ChannelID}}</h1>
+  <a href="/channels/{{.ChannelID}}" class="text-sm text-blue-600 hover:underline dark:text-blue-400">back to messages</a>
+</div>
+<div id="dlq"
+     hx-get="/ui/channels/{{.ChannelID}}/dlq"
+     hx-trigger="load, sse-message from:body delay:300ms"
+     hx-swap="innerHTML">
+  <p class="text-sm text-gray-400">loading…</p>
+</div>
+{{end}}

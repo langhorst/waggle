@@ -1,0 +1,50 @@
+{{define "_channels.html"}}
+<div class="relative overflow-x-auto shadow-md sm:rounded-lg">
+  <table class="w-full text-sm text-left text-gray-500 dark:text-gray-400">
+    <thead class="text-xs text-gray-700 uppercase bg-gray-100 dark:bg-gray-700 dark:text-gray-400">
+      <tr>
+        <th class="px-6 py-3">Channel</th>
+        <th class="px-6 py-3">Status</th>
+        <th class="px-6 py-3 text-right">Received</th>
+        <th class="px-6 py-3 text-right">Sent</th>
+        <th class="px-6 py-3 text-right">Errors</th>
+        <th class="px-6 py-3 text-right">Filtered</th>
+        <th class="px-6 py-3 text-right">Queued</th>
+        <th class="px-6 py-3">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Channels}}
+      <tr class="bg-white border-b dark:bg-gray-800 dark:border-gray-700">
+        <td class="px-6 py-4 font-medium text-gray-900 dark:text-white">
+          <a href="/channels/{{.ID}}" class="text-blue-600 hover:underline dark:text-blue-400">{{.ID}}</a>
+          <div class="text-xs text-gray-400">{{.Name}}</div>
+        </td>
+        <td class="px-6 py-4">{{statusBadge .Status}}</td>
+        <td class="px-6 py-4 text-right">{{count .Counts "RECEIVED" "TRANSFORMED"}}</td>
+        <td class="px-6 py-4 text-right">{{count .Counts "SENT"}}</td>
+        <td class="px-6 py-4 text-right">{{count .Counts "ERROR"}}</td>
+        <td class="px-6 py-4 text-right">{{count .Counts "FILTERED"}}</td>
+        <td class="px-6 py-4 text-right">{{sum .QueueDepth}}</td>
+        <td class="px-6 py-4">
+          <div class="inline-flex rounded-md shadow-sm" role="group">
+            <button hx-post="/ui/channels/{{.ID}}/start" hx-target="#channels"
+              class="px-3 py-1.5 text-xs font-medium text-gray-900 bg-white border border-gray-200 rounded-s-lg hover:bg-gray-100 hover:text-green-700 dark:bg-gray-800 dark:border-gray-700 dark:text-white">Start</button>
+            <button hx-post="/ui/channels/{{.ID}}/pause" hx-target="#channels"
+              class="px-3 py-1.5 text-xs font-medium text-gray-900 bg-white border-t border-b border-gray-200 hover:bg-gray-100 hover:text-yellow-600 dark:bg-gray-800 dark:border-gray-700 dark:text-white">Pause</button>
+            <button hx-post="/ui/channels/{{.ID}}/stop" hx-target="#channels"
+              class="px-3 py-1.5 text-xs font-medium text-gray-900 bg-white border border-gray-200 hover:bg-gray-100 hover:text-red-700 dark:bg-gray-800 dark:border-gray-700 dark:text-white">Stop</button>
+            <button hx-post="/ui/channels/{{.ID}}/reload" hx-target="#channels"
+              class="px-3 py-1.5 text-xs font-medium text-gray-900 bg-white border border-gray-200 rounded-e-lg hover:bg-gray-100 hover:text-blue-700 dark:bg-gray-800 dark:border-gray-700 dark:text-white">Reload</button>
+          </div>
+          <a href="/channels/{{.ID}}/dlq" class="ms-2 text-xs text-red-600 hover:underline dark:text-red-400">DLQ</a>
+          <a href="/channels/{{.ID}}/scripts" class="ms-2 text-xs text-blue-600 hover:underline dark:text-blue-400">Scripts</a>
+        </td>
+      </tr>
+      {{else}}
+      <tr class="bg-white dark:bg-gray-800"><td colspan="8" class="px-6 py-4 text-center">no channels configured</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}

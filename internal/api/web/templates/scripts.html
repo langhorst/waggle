@@ -1,0 +1,31 @@
+{{define "content"}}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Scripts — {{.ChannelID}}</h1>
+  <a href="/channels/{{.ChannelID}}" class="text-sm text-blue-600 hover:underline dark:text-blue-400">back to messages</a>
+</div>
+<div class="relative overflow-x-auto shadow-md sm:rounded-lg">
+  <table class="w-full text-sm text-left text-gray-500 dark:text-gray-400">
+    <thead class="text-xs text-gray-700 uppercase bg-gray-100 dark:bg-gray-700 dark:text-gray-400">
+      <tr><th class="px-6 py-3">Role</th><th class="px-6 py-3">Path</th><th class="px-6 py-3">Status</th><th class="px-6 py-3"></th></tr>
+    </thead>
+    <tbody>
+      {{range .Refs}}
+      <tr class="bg-white border-b dark:bg-gray-800 dark:border-gray-700">
+        <td class="px-6 py-3 font-medium text-gray-900 dark:text-white">{{.Role}}</td>
+        <td class="px-6 py-3 font-mono text-xs">{{.Path}}</td>
+        <td class="px-6 py-3 text-xs">
+          {{if .LastError}}<span class="text-red-600 dark:text-red-400">{{.LastError}}</span>
+          {{else}}<span class="text-green-600 dark:text-green-400">ok</span>{{end}}
+        </td>
+        <td class="px-6 py-3">
+          <a href="/scripts/edit?path={{.Path}}"
+             class="text-white bg-blue-700 hover:bg-blue-800 font-medium rounded-lg text-xs px-3 py-1.5 dark:bg-blue-600 dark:hover:bg-blue-700">Edit</a>
+        </td>
+      </tr>
+      {{else}}
+      <tr class="bg-white dark:bg-gray-800"><td colspan="4" class="px-6 py-4 text-center">this channel has no scripts</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}
