@@ -347,6 +347,42 @@ func (e *Engine) Pause(id string) error {
 	return m.ch.Pause()
 }
 
+// ReloadChannel re-reads a channel's YAML file (and recompiles its
+// scripts), rebuilds the channel, and restores its previous run state.
+func (e *Engine) ReloadChannel(ctx context.Context, id string) error {
+	m, err := e.managed(id)
+	if err != nil {
+		return err
+	}
+	if m.cfg.Path == "" {
+		return fmt.Errorf("engine: channel %s was not loaded from a file", id)
+	}
+	newCfg, err := config.LoadChannel(m.cfg.Path)
+	if err != nil {
+		return err
+	}
+	if newCfg.ID != id {
+		return fmt.Errorf("engine: %s now defines channel %q; delete and re-add instead of reloading", m.cfg.Path, newCfg.ID)
+	}
+	prev := m.ch.Status()
+	if err := e.Stop(id); err != nil {
+		return err
+	}
+	if err := e.LoadChannel(newCfg); err != nil {
+		return fmt.Errorf("engine: reloading %s: %w (channel left stopped)", id, err)
+	}
+	switch prev {
+	case channel.StatusStarted:
+		return e.Start(ctx, id)
+	case channel.StatusPaused:
+		if err := e.Start(ctx, id); err != nil {
+			return err
+		}
+		return e.Pause(id)
+	}
+	return nil
+}
+
 // Replay re-processes a stored message. With destID empty the original raw
 // bytes re-enter the pipeline as a new message (re-filter, re-transform,
 // re-queue) sharing the original's correlation ID. With destID set, the

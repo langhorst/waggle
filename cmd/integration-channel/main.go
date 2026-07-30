@@ -13,11 +13,14 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
+	"github.com/langhorst/integration-channel/internal/api"
 	"github.com/langhorst/integration-channel/internal/config"
 	"github.com/langhorst/integration-channel/internal/engine"
 	"github.com/langhorst/integration-channel/internal/script"
@@ -159,10 +162,28 @@ func runDaemon(args []string) int {
 	defer stop()
 
 	eng.StartEnabled(ctx)
+
+	apiServer := &api.Server{
+		Eng:         eng,
+		Scripts:     scripts,
+		ScriptsRoot: cfg.ChannelsDir,
+		Log:         log,
+	}
+	httpServer := &http.Server{Addr: cfg.Listen, Handler: apiServer.Handler()}
+	go func() {
+		log.Info("http api listening", "addr", cfg.Listen)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("http server", "error", err)
+			stop()
+		}
+	}()
 	log.Info("daemon running", "channels", len(channels))
 
 	<-ctx.Done()
 	log.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = httpServer.Shutdown(shutdownCtx)
 	eng.Shutdown()
 	return 0
 }
