@@ -12,6 +12,7 @@ import (
 	"github.com/langhorst/integration-channel/internal/channel"
 	"github.com/langhorst/integration-channel/internal/config"
 	"github.com/langhorst/integration-channel/internal/events"
+	"github.com/langhorst/integration-channel/internal/store"
 
 	_ "github.com/langhorst/integration-channel/internal/adapter/file"
 	_ "github.com/langhorst/integration-channel/internal/adapter/mllp"
@@ -104,6 +105,126 @@ delivered:
 	if len(processed) != 1 {
 		t.Errorf("input should be moved to processed, found %d", len(processed))
 	}
+}
+
+// TestStoreBackedQueueAndReplay is the phase 3 deliverable: messages flow
+// through the persistent queue to their destination, everything is recorded
+// in SQLite, and a stored message can be replayed through the pipeline.
+func TestStoreBackedQueueAndReplay(t *testing.T) {
+	work := t.TempDir()
+	inDir := filepath.Join(work, "in")
+	outDir := filepath.Join(work, "out")
+
+	st, err := store.Open(filepath.Join(work, "messages.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	chYAML := `
+id: persisted
+retention: 100
+source:
+  type: file-reader
+  dataType: hl7v2
+  settings: {dir: ` + inDir + `, interval: 50ms, minAge: 1ms}
+destinations:
+  - id: to-file
+    adapter:
+      type: file-writer
+      settings: {dir: ` + outDir + `, pattern: "{id}.hl7"}
+    queue: {retryInterval: 10ms}
+`
+	chPath := filepath.Join(work, "channel.yaml")
+	if err := os.WriteFile(chPath, []byte(chYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadChannel(chPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eng := New(Options{Store: st, Log: slog.New(slog.DiscardHandler)})
+	if err := eng.LoadChannel(cfg); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := eng.Start(ctx, "persisted"); err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Shutdown()
+
+	if err := os.MkdirAll(inDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inDir, "m1.hl7"), []byte(sampleHL7), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The queue worker delivers and the store records the full lifecycle.
+	var msgID int64
+	waitFor(t, "message SENT in store", func() bool {
+		list, err := st.ListMessages(ctx, "persisted", store.ListQuery{})
+		if err != nil || len(list) == 0 {
+			return false
+		}
+		msgID = list[0].ID
+		d, err := st.GetMessage(ctx, msgID)
+		if err != nil || len(d.Destinations) == 0 {
+			return false
+		}
+		return d.Destinations[0].State == "SENT"
+	})
+
+	d, err := st.GetMessage(ctx, msgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.State != "TRANSFORMED" || len(d.Raw) == 0 || len(d.Transformed) == 0 {
+		t.Errorf("stored message = state %s, raw %d bytes, transformed %d bytes", d.State, len(d.Raw), len(d.Transformed))
+	}
+
+	// Replay: same raw re-enters the pipeline as a new message.
+	replayID, err := eng.Replay(ctx, msgID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayID == msgID || replayID == 0 {
+		t.Fatalf("replay id = %d", replayID)
+	}
+	waitFor(t, "replay delivered", func() bool {
+		rd, err := st.GetMessage(ctx, replayID)
+		return err == nil && len(rd.Destinations) == 1 && rd.Destinations[0].State == "SENT"
+	})
+	rd, _ := st.GetMessage(ctx, replayID)
+	if rd.ReplayOf != msgID || rd.CorrelationID != d.CorrelationID {
+		t.Errorf("replay lineage: %+v", rd.MessageSummary)
+	}
+	entries, _ := os.ReadDir(outDir)
+	if len(entries) != 2 {
+		t.Errorf("expected original + replay output files, got %d", len(entries))
+	}
+
+	// Destination requeue: re-send the stored payload without re-transform.
+	if _, err := eng.Replay(ctx, msgID, "to-file"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "requeued payload delivered", func() bool {
+		entries, _ := os.ReadDir(outDir)
+		return len(entries) == 3
+	})
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }
 
 func TestChannelLifecycleViaEngine(t *testing.T) {

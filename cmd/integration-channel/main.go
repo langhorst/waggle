@@ -15,10 +15,12 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/langhorst/integration-channel/internal/config"
 	"github.com/langhorst/integration-channel/internal/engine"
+	"github.com/langhorst/integration-channel/internal/store"
 
 	// Register the built-in adapters and format modules.
 	_ "github.com/langhorst/integration-channel/internal/adapter/file"
@@ -66,7 +68,18 @@ func runDaemon(args []string) int {
 		log.Warn("no channels configured", "dir", cfg.ChannelsDir)
 	}
 
-	eng := engine.New(engine.Options{Log: log})
+	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+		log.Error("creating data dir", "error", err)
+		return 1
+	}
+	st, err := store.Open(filepath.Join(cfg.DataDir, "messages.db"))
+	if err != nil {
+		log.Error("opening message store", "error", err)
+		return 1
+	}
+	defer st.Close()
+
+	eng := engine.New(engine.Options{Log: log, Store: st})
 	for _, ch := range channels {
 		if err := eng.LoadChannel(ch); err != nil {
 			log.Error("loading channel", "channel", ch.ID, "error", err)

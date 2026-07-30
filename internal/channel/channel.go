@@ -60,6 +60,13 @@ type Recorder interface {
 	SetDestinationState(ctx context.Context, id int64, destID string, state message.State, payload []byte, errText string) error
 }
 
+// Queuer hands a recorded delivery to the Guaranteed Delivery queue (the
+// serialized payload is already stored via SetDestinationState). Implemented
+// by the store; nil means deliveries happen synchronously in the pipeline.
+type Queuer interface {
+	Enqueue(ctx context.Context, channelID, destID string, messageID int64) error
+}
+
 // Destination is one entry of the channel's Recipient List.
 type Destination struct {
 	ID         string
@@ -81,8 +88,12 @@ type Channel struct {
 	Destinations []*Destination
 
 	Recorder Recorder
-	Bus      *events.Bus
-	Log      *slog.Logger
+	// Queue enables Guaranteed Delivery: non-waitForAck destinations are
+	// enqueued for their per-destination worker instead of sent inline. Nil
+	// keeps deliveries synchronous (tests, storeless runs).
+	Queue Queuer
+	Bus   *events.Bus
+	Log   *slog.Logger
 
 	mu        sync.Mutex
 	status    Status
@@ -226,6 +237,26 @@ func (c *Channel) deliver(ctx context.Context, raw []byte, meta map[string]strin
 	return adapter.Receipt{MessageID: m.ID, Done: done}, nil
 }
 
+// Inject records and processes a message that did not arrive through the
+// source adapter — message replay. The channel must not be stopped.
+func (c *Channel) Inject(ctx context.Context, m *message.Message) (int64, error) {
+	if c.Status() == StatusStopped {
+		return 0, fmt.Errorf("channel %s: stopped; start it to replay messages", c.ID)
+	}
+	if err := c.Recorder.Record(ctx, m); err != nil {
+		return 0, fmt.Errorf("channel %s: recording replay: %w", c.ID, err)
+	}
+	c.publishMessage(m.ID, message.StateReceived, "")
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.pipeMu.Lock()
+		defer c.pipeMu.Unlock()
+		_ = c.process(context.WithoutCancel(ctx), m)
+	}()
+	return m.ID, nil
+}
+
 // process runs one message through the pipeline and returns the ACK
 // decision for destination-ACK sources.
 func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDecision {
@@ -328,6 +359,18 @@ func (c *Channel) sendTo(ctx context.Context, d *Destination, m *message.Message
 
 	_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateQueued, payload, "")
 	c.publishDestination(m.ID, d.ID, message.StateQueued)
+
+	// Guaranteed Delivery: hand non-waitForAck deliveries to the queue
+	// worker. waitForAck destinations stay synchronous — single attempt, the
+	// upstream sender owns retry (their outcome drives the source ACK).
+	if c.Queue != nil && !d.WaitForAck {
+		if err := c.Queue.Enqueue(ctx, c.ID, d.ID, m.ID); err != nil {
+			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, payload, err.Error())
+			c.publishDestination(m.ID, d.ID, message.StateError)
+			return fmt.Errorf("enqueue: %w", err)
+		}
+		return nil
+	}
 
 	meta := copyMeta(dm.Meta)
 	meta["message.id"] = fmt.Sprintf("%d", m.ID)

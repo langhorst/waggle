@@ -9,12 +9,15 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/langhorst/integration-channel/internal/adapter"
 	"github.com/langhorst/integration-channel/internal/channel"
 	"github.com/langhorst/integration-channel/internal/config"
 	"github.com/langhorst/integration-channel/internal/events"
 	"github.com/langhorst/integration-channel/internal/format"
+	"github.com/langhorst/integration-channel/internal/queue"
+	"github.com/langhorst/integration-channel/internal/store"
 )
 
 // ScriptEngine compiles referenced script files into pipeline steps. The
@@ -27,8 +30,13 @@ type ScriptEngine interface {
 
 // Options configures a new Engine.
 type Options struct {
-	Bus      *events.Bus
-	Log      *slog.Logger
+	Bus *events.Bus
+	Log *slog.Logger
+	// Store enables persistence and Guaranteed Delivery: it becomes the
+	// pipeline Recorder and Queuer, and per-destination delivery workers run
+	// alongside each channel. Without it the engine falls back to Recorder
+	// (or an in-memory recorder) with synchronous delivery.
+	Store    *store.Store
 	Recorder channel.Recorder
 	Scripts  ScriptEngine
 }
@@ -37,6 +45,7 @@ type Options struct {
 type Engine struct {
 	bus      *events.Bus
 	log      *slog.Logger
+	store    *store.Store
 	recorder channel.Recorder
 	scripts  ScriptEngine
 
@@ -46,8 +55,12 @@ type Engine struct {
 }
 
 type managed struct {
-	cfg *config.Channel
-	ch  *channel.Channel
+	cfg     *config.Channel
+	ch      *channel.Channel
+	workers []*queue.Worker
+
+	workersCancel context.CancelFunc
+	workersDone   *sync.WaitGroup
 }
 
 // Info is a channel summary for UIs.
@@ -64,17 +77,23 @@ func New(opts Options) *Engine {
 	if opts.Log == nil {
 		opts.Log = slog.Default()
 	}
-	if opts.Recorder == nil {
+	if opts.Store != nil {
+		opts.Recorder = opts.Store
+	} else if opts.Recorder == nil {
 		opts.Recorder = channel.NewMemoryRecorder()
 	}
 	return &Engine{
 		bus:      opts.Bus,
 		log:      opts.Log,
+		store:    opts.Store,
 		recorder: opts.Recorder,
 		scripts:  opts.Scripts,
 		channels: map[string]*managed{},
 	}
 }
+
+// Store returns the engine's store (nil when running without persistence).
+func (e *Engine) Store() *store.Store { return e.store }
 
 // Bus returns the engine's event bus.
 func (e *Engine) Bus() *events.Bus { return e.bus }
@@ -86,18 +105,48 @@ func (e *Engine) LoadChannel(cfg *config.Channel) error {
 	if err != nil {
 		return err
 	}
+	m := &managed{cfg: cfg, ch: ch, workers: e.buildWorkers(cfg, ch)}
+	if e.store != nil {
+		e.store.SetRetention(cfg.ID, cfg.RetentionCount())
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if existing, ok := e.channels[cfg.ID]; ok {
 		if existing.ch.Status() != channel.StatusStopped {
 			return fmt.Errorf("engine: channel %s is %s; stop it before reloading", cfg.ID, existing.ch.Status())
 		}
-		e.channels[cfg.ID] = &managed{cfg: cfg, ch: ch}
+		e.channels[cfg.ID] = m
 		return nil
 	}
-	e.channels[cfg.ID] = &managed{cfg: cfg, ch: ch}
+	e.channels[cfg.ID] = m
 	e.order = append(e.order, cfg.ID)
 	return nil
+}
+
+// buildWorkers creates one Guaranteed Delivery worker per queueing
+// destination (waitForAck destinations deliver synchronously and get none).
+func (e *Engine) buildWorkers(cfg *config.Channel, ch *channel.Channel) []*queue.Worker {
+	if e.store == nil {
+		return nil
+	}
+	var workers []*queue.Worker
+	for i := range cfg.Destinations {
+		dcfg := &cfg.Destinations[i]
+		if dcfg.WaitForAck {
+			continue
+		}
+		workers = append(workers, &queue.Worker{
+			Store:        e.store,
+			Adapter:      ch.Destinations[i].Adapter,
+			ChannelID:    cfg.ID,
+			DestID:       dcfg.ID,
+			MaxAttempts:  dcfg.Queue.MaxAttemptCount(),
+			BaseInterval: time.Duration(dcfg.Queue.RetryInterval),
+			Bus:          e.bus,
+			Log:          e.log,
+		})
+	}
+	return workers
 }
 
 func (e *Engine) build(cfg *config.Channel) (*channel.Channel, error) {
@@ -118,6 +167,9 @@ func (e *Engine) build(cfg *config.Channel) (*channel.Channel, error) {
 		Recorder: e.recorder,
 		Bus:      e.bus,
 		Log:      e.log,
+	}
+	if e.store != nil {
+		ch.Queue = e.store
 	}
 
 	if ch.Filter, err = e.compileFilter(cfg, cfg.Filter); err != nil {
@@ -217,34 +269,110 @@ func (e *Engine) Config(id string) (*config.Channel, bool) {
 	return m.cfg, true
 }
 
-// Start starts (or resumes) a channel.
+func (e *Engine) managed(id string) (*managed, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	m, ok := e.channels[id]
+	if !ok {
+		return nil, fmt.Errorf("engine: unknown channel %q", id)
+	}
+	return m, nil
+}
+
+// Start starts (or resumes) a channel and its delivery workers.
 func (e *Engine) Start(ctx context.Context, id string) error {
-	ch, ok := e.Channel(id)
-	if !ok {
-		return fmt.Errorf("engine: unknown channel %q", id)
+	m, err := e.managed(id)
+	if err != nil {
+		return err
 	}
-	if ch.Status() == channel.StatusPaused {
-		return ch.Resume(ctx)
+	if m.ch.Status() == channel.StatusPaused {
+		return m.ch.Resume(ctx)
 	}
-	return ch.Start(ctx)
+	if err := m.ch.Start(ctx); err != nil {
+		return err
+	}
+	e.startWorkers(ctx, m)
+	return nil
 }
 
-// Stop stops a channel.
+// startWorkers launches a channel's Guaranteed Delivery workers (idempotent
+// across pause/resume — they run from Start until Stop).
+func (e *Engine) startWorkers(ctx context.Context, m *managed) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if m.workersCancel != nil || len(m.workers) == 0 {
+		return
+	}
+	wctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	wg := &sync.WaitGroup{}
+	m.workersCancel = cancel
+	m.workersDone = wg
+	for _, w := range m.workers {
+		wg.Add(1)
+		go func(w *queue.Worker) {
+			defer wg.Done()
+			w.Run(wctx)
+		}(w)
+	}
+}
+
+// Stop stops a channel: workers first (so no send races a closing adapter),
+// then intake and adapters.
 func (e *Engine) Stop(id string) error {
-	ch, ok := e.Channel(id)
-	if !ok {
-		return fmt.Errorf("engine: unknown channel %q", id)
+	m, err := e.managed(id)
+	if err != nil {
+		return err
 	}
-	return ch.Stop()
+	e.stopWorkers(m)
+	return m.ch.Stop()
 }
 
-// Pause pauses a channel's intake.
-func (e *Engine) Pause(id string) error {
-	ch, ok := e.Channel(id)
-	if !ok {
-		return fmt.Errorf("engine: unknown channel %q", id)
+func (e *Engine) stopWorkers(m *managed) {
+	e.mu.Lock()
+	cancel, done := m.workersCancel, m.workersDone
+	m.workersCancel, m.workersDone = nil, nil
+	e.mu.Unlock()
+	if cancel != nil {
+		cancel()
+		done.Wait()
 	}
-	return ch.Pause()
+}
+
+// Pause pauses a channel's intake; queued deliveries keep draining.
+func (e *Engine) Pause(id string) error {
+	m, err := e.managed(id)
+	if err != nil {
+		return err
+	}
+	return m.ch.Pause()
+}
+
+// Replay re-processes a stored message. With destID empty the original raw
+// bytes re-enter the pipeline as a new message (re-filter, re-transform,
+// re-queue) sharing the original's correlation ID. With destID set, the
+// already-transformed stored payload is requeued to that one destination
+// without re-running the pipeline. Returns the new message ID (0 for
+// destination requeue).
+func (e *Engine) Replay(ctx context.Context, messageID int64, destID string) (int64, error) {
+	if e.store == nil {
+		return 0, fmt.Errorf("engine: replay requires persistence")
+	}
+	detail, err := e.store.GetMessage(ctx, messageID)
+	if err != nil {
+		return 0, err
+	}
+	m, err := e.managed(detail.ChannelID)
+	if err != nil {
+		return 0, fmt.Errorf("engine: message %d belongs to unloaded channel %q", messageID, detail.ChannelID)
+	}
+	if destID != "" {
+		return 0, e.store.Requeue(ctx, messageID, destID)
+	}
+	replay, err := e.store.NewReplay(ctx, messageID)
+	if err != nil {
+		return 0, err
+	}
+	return m.ch.Inject(ctx, replay)
 }
 
 // StartEnabled starts every enabled channel, collecting errors rather than
@@ -264,14 +392,15 @@ func (e *Engine) StartEnabled(ctx context.Context) []error {
 		if err := m.ch.Start(ctx); err != nil {
 			e.log.Error("channel failed to start", "channel", m.cfg.ID, "error", err)
 			errs = append(errs, err)
-		} else {
-			e.log.Info("channel started", "channel", m.cfg.ID)
+			continue
 		}
+		e.startWorkers(ctx, m)
+		e.log.Info("channel started", "channel", m.cfg.ID)
 	}
 	return errs
 }
 
-// Shutdown stops all channels.
+// Shutdown stops all channels and their workers.
 func (e *Engine) Shutdown() {
 	e.mu.Lock()
 	var all []*managed
@@ -280,6 +409,7 @@ func (e *Engine) Shutdown() {
 	}
 	e.mu.Unlock()
 	for _, m := range all {
+		e.stopWorkers(m)
 		if err := m.ch.Stop(); err != nil {
 			e.log.Error("channel failed to stop cleanly", "channel", m.cfg.ID, "error", err)
 		}
