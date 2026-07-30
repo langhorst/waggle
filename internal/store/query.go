@@ -38,10 +38,11 @@ type DestinationStatus struct {
 // MessageDetail is the full stored record of one message.
 type MessageDetail struct {
 	MessageSummary
-	Raw          []byte              `json:"-"`
-	Transformed  []byte              `json:"-"`
-	Meta         map[string]string   `json:"meta,omitempty"`
-	Destinations []DestinationStatus `json:"destinations"`
+	Raw                 []byte              `json:"-"`
+	Transformed         []byte              `json:"-"`
+	TransformedDataType string              `json:"transformedDataType,omitempty"`
+	Meta                map[string]string   `json:"meta,omitempty"`
+	Destinations        []DestinationStatus `json:"destinations"`
 }
 
 // ListQuery filters ListMessages. Zero values mean "no filter"; Limit
@@ -109,13 +110,13 @@ var ErrNotFound = errors.New("store: message not found")
 func (s *Store) GetMessage(ctx context.Context, id int64) (*MessageDetail, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, channel_id, correlation_id, COALESCE(replay_of, 0), state, data_type, error_text, received_at, updated_at,
-		       raw, COALESCE(transformed, x''), meta_json
+		       raw, COALESCE(transformed, x''), transformed_data_type, meta_json
 		FROM messages WHERE id = ?`, id)
 	var d MessageDetail
 	var received, updated int64
 	var metaJSON string
 	if err := row.Scan(&d.ID, &d.ChannelID, &d.CorrelationID, &d.ReplayOf, &d.State,
-		&d.DataType, &d.ErrorText, &received, &updated, &d.Raw, &d.Transformed, &metaJSON); err != nil {
+		&d.DataType, &d.ErrorText, &received, &updated, &d.Raw, &d.Transformed, &d.TransformedDataType, &metaJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}

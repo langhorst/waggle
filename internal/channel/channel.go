@@ -65,8 +65,10 @@ type Recorder interface {
 	// SetState records a pipeline-level state change.
 	SetState(ctx context.Context, id int64, state message.State, errText string) error
 	// SetTransformed stores the serialized output of the channel-level
-	// translator chain (feeds the received-vs-sent diff).
-	SetTransformed(ctx context.Context, id int64, payload []byte) error
+	// translator chain and its data type — which may differ from the
+	// inbound type after format conversion (feeds the received-vs-sent
+	// diff and the tree explorer).
+	SetTransformed(ctx context.Context, id int64, payload []byte, dataType string) error
 	// SetDestinationState records a per-destination state change; payload is
 	// the destination-serialized bytes when known.
 	SetDestinationState(ctx context.Context, id int64, destID string, state message.State, payload []byte, errText string) error
@@ -303,7 +305,7 @@ func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDe
 	}
 	outType := c.transformedType(m)
 	if transformed, err := outType.Serialize(m.Tree); err == nil {
-		_ = c.Recorder.SetTransformed(ctx, m.ID, transformed)
+		_ = c.Recorder.SetTransformed(ctx, m.ID, transformed, outType.Name())
 	}
 	m.State = message.StateTransformed
 	_ = c.Recorder.SetState(ctx, m.ID, message.StateTransformed, "")

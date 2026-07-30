@@ -22,6 +22,9 @@ import (
 	"github.com/langhorst/integration-channel/internal/engine"
 	"github.com/langhorst/integration-channel/internal/script"
 	"github.com/langhorst/integration-channel/internal/store"
+	"github.com/langhorst/integration-channel/internal/tui"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	// Register the built-in adapters and format modules.
 	_ "github.com/langhorst/integration-channel/internal/adapter/file"
@@ -41,10 +44,71 @@ func main() {
 	switch cmd {
 	case "daemon":
 		os.Exit(runDaemon(args))
+	case "tui":
+		os.Exit(runTUI(args))
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q (expected: daemon)\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown command %q (expected: daemon, tui)\n", cmd)
 		os.Exit(2)
 	}
+}
+
+// runTUI starts the engine in-process from the same config and attaches the
+// read-only observer TUI. Logs go to a file so they don't tear the screen.
+func runTUI(args []string) int {
+	fs := flag.NewFlagSet("tui", flag.ExitOnError)
+	configPath := fs.String("config", "daemon.yaml", "path to daemon config")
+	_ = fs.Parse(args)
+
+	cfg, err := config.LoadDaemon(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "loading daemon config: %v\n", err)
+		return 1
+	}
+	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "creating data dir: %v\n", err)
+		return 1
+	}
+	logFile, err := os.OpenFile(filepath.Join(cfg.DataDir, "tui.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "opening log file: %v\n", err)
+		return 1
+	}
+	defer logFile.Close()
+	log := slog.New(slog.NewTextHandler(logFile, nil))
+	slog.SetDefault(log)
+
+	channels, err := config.LoadChannels(cfg.ChannelsDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "loading channels: %v\n", err)
+		return 1
+	}
+	st, err := store.Open(filepath.Join(cfg.DataDir, "messages.db"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "opening message store: %v\n", err)
+		return 1
+	}
+	defer st.Close()
+	scripts := script.New(script.Options{HotReload: cfg.HotReload, Log: log})
+	defer scripts.Close()
+
+	eng := engine.New(engine.Options{Log: log, Store: st, Scripts: scripts})
+	for _, ch := range channels {
+		if err := eng.LoadChannel(ch); err != nil {
+			fmt.Fprintf(os.Stderr, "loading channel %s: %v\n", ch.ID, err)
+			return 1
+		}
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	eng.StartEnabled(ctx)
+	defer eng.Shutdown()
+
+	p := tea.NewProgram(tui.New(tui.EngineBackend{Eng: eng}), tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "tui: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func runDaemon(args []string) int {

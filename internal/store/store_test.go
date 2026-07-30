@@ -44,7 +44,7 @@ func TestRecordAndGet(t *testing.T) {
 	if m.ID == 0 {
 		t.Fatal("Record must assign an ID")
 	}
-	if err := s.SetTransformed(ctx, m.ID, []byte("transformed")); err != nil {
+	if err := s.SetTransformed(ctx, m.ID, []byte("transformed"), "hl7v2"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetState(ctx, m.ID, message.StateTransformed, ""); err != nil {

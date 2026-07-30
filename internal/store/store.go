@@ -167,10 +167,10 @@ func (s *Store) SetState(ctx context.Context, id int64, state message.State, err
 	return nil
 }
 
-func (s *Store) SetTransformed(ctx context.Context, id int64, payload []byte) error {
+func (s *Store) SetTransformed(ctx context.Context, id int64, payload []byte, dataType string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE messages SET transformed = ?, updated_at = ? WHERE id = ?`,
-		payload, nowMillis(), id)
+		`UPDATE messages SET transformed = ?, transformed_data_type = ?, updated_at = ? WHERE id = ?`,
+		payload, dataType, nowMillis(), id)
 	if err != nil {
 		return fmt.Errorf("store: set transformed: %w", err)
 	}

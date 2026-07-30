@@ -75,7 +75,7 @@ func (r *recordingRecorder) SetState(ctx context.Context, id int64, state messag
 	r.log("msg:%s", state)
 	return nil
 }
-func (r *recordingRecorder) SetTransformed(ctx context.Context, id int64, payload []byte) error {
+func (r *recordingRecorder) SetTransformed(ctx context.Context, id int64, payload []byte, dataType string) error {
 	r.log("transformed")
 	return nil
 }
