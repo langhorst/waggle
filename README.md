@@ -114,13 +114,32 @@ application-status channel. Sender-side failures (busy NAK, retry
 exhaustion, interrupts, timeouts) are all transient: the delivery queue
 retries with backoff and dead-letters after `maxAttempts`.
 
-**Lab bridge example** (`examples/channels/astm-to-mllp.yaml` and
-`mllp-to-astm.yaml`): results arriving as E1394 over E1381 are converted to
-HL7 ORU^R01 by `scripts/astm-to-hl7.js` and forwarded over MLLP — and the
-reverse channel converts HL7 back to E1394 for delivery over E1381. The
-same scripts are exercised end-to-end by `TestASTMBridgeRoundTrip`, which
-chains both channels and checks the fields that come out the far side
-against what went in.
+**Lab bridge examples** (`examples/channels/`): the full bidirectional lab
+workflow, with results flowing up and orders/queries flowing down —
+
+```
+            results (ORU^R01)                      results (E1394)
+   HIS/LIS ◄──────────────────── integration ◄──────────────────── instrument
+            MLLP                   channel          E1381
+   HIS/LIS ────────────────────►            ────────────────────► instrument
+            orders (ORM^O01)                       orders (E1394)
+                                            ◄──── query (Q record)
+                                            ────► order response
+```
+
+- `astm-to-mllp.yaml` / `mllp-to-astm.yaml`: E1394 results over E1381 →
+  HL7 ORU^R01 over MLLP, and the reverse (`astm-to-hl7.js`,
+  `hl7-to-astm.js`). Chained end-to-end by `TestASTMBridgeRoundTrip`.
+- `orders-to-instrument.yaml`: HL7 ORM^O01 over MLLP → ASTM order message
+  over E1381 (`hl7-orm-to-astm.js`; ORC-1 order control maps to the O-11
+  action code: NW→N, CA→C). Covered by `TestOrderDownloadEndToEnd`.
+- `instrument-query.yaml`: an instrument's ASTM query (Q record) is
+  answered with an order message for the queried specimen — request-reply
+  as two opposite half-duplex E1381 sessions on one channel
+  (`only-queries.js` filter + `astm-query-to-order.js`; swap the script
+  body for a real order lookup). Covered by `TestQueryResponseRoundTrip`,
+  including the assertion that non-query traffic is FILTERED and produces
+  no response.
 
 **Delivery.** Each queueing destination has exactly one worker draining
 its FIFO queue: transient failures back off exponentially (jittered,
