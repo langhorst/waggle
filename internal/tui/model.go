@@ -39,7 +39,7 @@ type Model struct {
 	backend Backend
 	ctx     context.Context
 
-	eventCh     <-chan events.Event
+	eventCh      <-chan events.Event
 	cancelEvents func()
 
 	width, height int

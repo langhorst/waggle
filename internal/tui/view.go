@@ -11,12 +11,12 @@ import (
 )
 
 var (
-	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("55")).Padding(0, 1)
-	headerStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
-	cursorStyle   = lipgloss.NewStyle().Background(lipgloss.Color("236")).Bold(true)
-	helpStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	errStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
-	tabStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Padding(0, 1)
+	titleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("55")).Padding(0, 1)
+	headerStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
+	cursorStyle    = lipgloss.NewStyle().Background(lipgloss.Color("236")).Bold(true)
+	helpStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	errStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
+	tabStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Padding(0, 1)
 	tabActiveStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("55")).Padding(0, 1)
 
 	stateColors = map[message.State]string{
@@ -254,7 +254,7 @@ func (m Model) renderDestinations() string {
 	if len(m.detail.Destinations) == 0 {
 		return helpStyle.Render("no destination activity recorded")
 	}
-	b.WriteString(headerStyle.Render(fmt.Sprintf("%-20s %-12s %8s  %s", "DESTINATION", "STATE", "ATTEMPTS", "LAST ERROR"))+ "\n")
+	b.WriteString(headerStyle.Render(fmt.Sprintf("%-20s %-12s %8s  %s", "DESTINATION", "STATE", "ATTEMPTS", "LAST ERROR")) + "\n")
 	for _, ds := range m.detail.Destinations {
 		b.WriteString(fmt.Sprintf("%-20s %-22s %8d  %s\n",
 			truncate(ds.DestinationID, 20), stateBadge(ds.State), ds.Attempts, truncate(ds.LastError, 50)))

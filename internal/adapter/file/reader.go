@@ -27,8 +27,8 @@ func init() {
 // delivered as one message; on acceptance it moves to ProcessedDir, on
 // rejection to ErrorDir, so a file is never delivered twice.
 type ReaderConfig struct {
-	Dir     string `yaml:"dir"`
-	Pattern string `yaml:"pattern"`  // glob against the base name; default "*"
+	Dir      string           `yaml:"dir"`
+	Pattern  string           `yaml:"pattern"`  // glob against the base name; default "*"
 	Interval adapter.Duration `yaml:"interval"` // poll interval; default 2s
 	// MinAge skips files modified more recently than this, so half-written
 	// files are not picked up. Default 1s.

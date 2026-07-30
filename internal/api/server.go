@@ -31,7 +31,7 @@ type Server struct {
 	// ScriptsRoot confines script file access: only files under this
 	// directory are readable/writable via the API.
 	ScriptsRoot string
-	Log *slog.Logger
+	Log         *slog.Logger
 
 	started time.Time
 }

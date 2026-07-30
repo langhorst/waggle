@@ -1,0 +1,28 @@
+# An HL7 v2 ADT feed received over MLLP, validated and transformed in
+# JavaScript, fanned out to a CSV extract and an HL7 archive file.
+id: adt-feed
+name: ADT feed
+retention: 1000              # keep the newest 1000 messages (-1 = unlimited)
+source:
+  type: mllp-listener
+  dataType: hl7v2
+  settings:
+    addr: ":6661"
+    ackMode: immediate       # or "destination" to hold the ACK for waitForAck destinations
+filter: scripts/only-adt.js
+transformers:
+  - scripts/uppercase-name.js
+destinations:
+  - id: csv-extract
+    dataType: csv
+    transformers: [scripts/to-csv.js]
+    adapter:
+      type: file-writer
+      settings: {dir: out/csv, pattern: "{ts}-{id}.csv"}
+    queue:
+      maxAttempts: 10        # -1 retries forever
+      retryInterval: 1s
+  - id: hl7-archive
+    adapter:
+      type: file-writer
+      settings: {dir: out/archive, pattern: "{ts}-{id}.hl7"}

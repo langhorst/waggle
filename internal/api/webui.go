@@ -95,7 +95,7 @@ var pages = func() map[string]*template.Template {
 	}
 	// Partials render standalone for HTMX swaps.
 	for _, partial := range []string{"_channels", "_messages", "_tree", "_diff", "_destinations", "_dlq"} {
-		out[partial] = template.Must(template.New(partial + ".html").Funcs(templateFuncs).
+		out[partial] = template.Must(template.New(partial+".html").Funcs(templateFuncs).
 			ParseFS(templateFS, "web/templates/"+partial+".html"))
 	}
 	return out

@@ -105,7 +105,7 @@ destinations:
   - {id: d, adapter: {type: file-writer}}
   - {id: d, adapter: {type: file-writer}}
 `,
-		"zero retention": strings.Replace(validChannel, "retention: 500", "retention: 0", 1),
+		"zero retention":   strings.Replace(validChannel, "retention: 500", "retention: 0", 1),
 		"zero maxAttempts": strings.Replace(validChannel, "maxAttempts: 5", "maxAttempts: 0", 1),
 	}
 	dir := t.TempDir()

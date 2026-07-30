@@ -1,0 +1,162 @@
+# integration-channel
+
+A self-contained integration engine in Go, inspired by Mirth Connect and
+built strictly on the vocabulary of *Enterprise Integration Patterns*
+(Hohpe & Woolf). One binary, no external dependencies at runtime, fully
+offline: a headless daemon hosts any number of **channels**, each moving
+messages from an inbound **Channel Adapter** through a **Message Filter**
+and a chain of **Message Translators** (JavaScript) to a **Recipient List**
+of outbound Channel Adapters with **Guaranteed Delivery**.
+
+```
+                        ┌────────────────────── channel ──────────────────────┐
+  MLLP / files  ──────► │ inbound adapter → filter → translator chain ─┬─► queue → MLLP sender
+                        │        │                                     ├─► queue → file writer
+                        │     SQLite (messages, queues, replay)        └─► …
+                        └─────────────────────────────────────────────────────┘
+                                  ▲                        ▲
+                          TUI (embedded)          web UI + REST/SSE API
+```
+
+## Quick start
+
+```sh
+go build ./cmd/integration-channel
+
+cd examples
+../integration-channel daemon            # web UI on http://localhost:8420
+# or attach the read-only observer TUI (engine runs in-process):
+../integration-channel tui
+```
+
+Drop an HL7 file into a file-reader channel's directory, or fire messages
+at an MLLP listener, and watch them flow in the UI: live message list,
+structural diff of received vs. sent, tree explorer, dead-letter queue,
+replay.
+
+## EIP glossary → implementation
+
+| EIP term (Hohpe & Woolf)   | Here                                                              |
+|----------------------------|-------------------------------------------------------------------|
+| Message                    | `internal/message.Message` — raw bytes + canonical tree + states  |
+| Message Channel            | Go channels + the per-destination SQLite queue                    |
+| Channel Adapter (inbound)  | `mllp-listener`, `file-reader` (`internal/adapter/...`)           |
+| Polling Consumer           | the `file-reader` source                                          |
+| Pipes and Filters          | the channel pipeline (`internal/channel`)                         |
+| Message Filter             | `filter:` script — distinct step, drops retain the message        |
+| Message Translator         | `transformers:` script chain (goja JavaScript)                    |
+| Recipient List             | `destinations:` — each with its own filter/translator chain       |
+| Channel Adapter (outbound) | `mllp-sender`, `file-writer`                                      |
+| Guaranteed Delivery        | SQLite-backed per-destination queues with retry/backoff           |
+| Dead Letter Channel        | exhausted retries & application NAKs (`dead_letter`, requeueable) |
+| Invalid Message Channel    | parse/script failures (state `ERROR`, replayable)                 |
+| Message Store              | `internal/store` (SQLite via modernc.org/sqlite, pure Go)         |
+
+## Concepts
+
+**Formats.** Every message parses into a generic tree shared by all
+formats; format modules (`hl7v2`, `astm`, `csv`) provide parse, serialize,
+and a 1-based path dialect:
+
+- HL7 v2: `PID-5.1`, `PID-3[2].1`, `OBX[2]-5`, `MSH-9.1.2` (segment →
+  field → repetition → component → subcomponent, escapes decoded/encoded
+  at the parse boundary, delimiters honored from MSH-1/MSH-2)
+- ASTM E1394: `H-5`, `R[2]-3.1` (delimiters from the H record)
+- CSV: `R.1`, `R[2].3` (rows and columns)
+
+Adding a format means implementing `format.DataType` and registering it —
+compile-time, like adapters. Transformers are data; adapters and formats
+are code.
+
+**Scripts.** Filters and transformers are plain JavaScript files (goja —
+pure Go, sandboxed: no filesystem, no network, interrupt timeout):
+
+```js
+// filter: return true to keep the message
+function filter(msg) { return msg.get('MSH-9.1') === 'ADT'; }
+
+// transformer: mutate in place…
+function transform(msg) {
+  msg.set('PID-5.1', msg.get('PID-5.1').toUpperCase());
+  msg.segments('OBX').forEach((obx, i) => obx.set('1', String(i + 1)));
+}
+
+// …or convert formats by returning a new message
+function transform(msg) {
+  var out = newMessage('csv');
+  out.set('R.1', msg.get('PID-3.1'));
+  return out;
+}
+```
+
+Script API: `msg.get/set/getAll/segments`, `msg.raw`, `msg.dataType`,
+`newMessage(dataType)`, `meta`, `logger.info/warn/error`, and
+`response.reject(code, text)` / `response.setAck(code, text)` for
+validation-driven ACKs. Hot reload is on by default: edit a script and the
+next message uses it; a broken save keeps the previous version running.
+
+**ACK modes (MLLP).** `ackMode: immediate` acknowledges as soon as the
+message is durably recorded (the Guaranteed Delivery handoff).
+`ackMode: destination` holds the ACK until the pipeline finishes: scripts
+can reject with a meaningful `AR`, and destinations marked
+`waitForAck: true` deliver synchronously (single attempt — the upstream
+sender owns retry) with their outcome deciding the ACK. Non-waiting
+destinations always go through the queue.
+
+**Delivery.** Each queueing destination has exactly one worker draining
+its FIFO queue: transient failures back off exponentially (jittered,
+capped at 5m) without reordering; application NAKs (AE/AR) dead-letter
+immediately; exhausted retries dead-letter after `maxAttempts`. Queues
+live in SQLite, so a crash or restart loses nothing. Paused channels stop
+intake but keep draining.
+
+**Replay.** Any stored message can re-enter the pipeline (new message, same
+correlation ID, `replay_of` lineage) or have its already-transformed
+payload requeued to a single destination.
+
+## HTTP API
+
+```
+GET    /api/status                                  GET  /api/events            (SSE)
+GET    /api/channels                                GET  /api/channels/{id}/events
+POST   /api/channels/{id}/start|stop|pause|reload
+GET    /api/channels/{id}/messages?limit&before_id&state=
+GET    /api/channels/{id}/dlq                       POST /api/dlq/{msg}/{dest}/requeue
+GET    /api/channels/{id}/scripts                   GET|PUT /api/scripts?path=
+GET    /api/messages/{id}
+GET    /api/messages/{id}/tree?stage=received|transformed|dest:{destID}
+GET    /api/messages/{id}/diff?dest={destID}
+POST   /api/messages/{id}/replay[?destination={destID}]
+```
+
+The web UI (HTMX + Flowbite, embedded and offline) is served at `/` and is
+the full-control surface; the TUI is a read-only observer that embeds the
+engine directly.
+
+## Configuration
+
+See `examples/`. One `daemon.yaml` plus one YAML file per channel;
+scripts are separate `.js` files referenced by path (relative to the
+channel file). Unknown keys are load-time errors. `retention: -1` keeps
+messages forever; queue-referenced messages are never pruned.
+
+## Development
+
+```sh
+go test ./...            # unit, functional, and E2E tests (no network needed)
+go test -race ./...
+go vet ./...
+go test ./internal/format/... -fuzz=FuzzParse -fuzztime=30s   # parser fuzzing
+go test ./internal/format/hl7v2 ./internal/channel -bench=. -run=NONE
+```
+
+Package map: `internal/message` (tree, states, diff) · `internal/format/*`
+(data types) · `internal/adapter/*` (Channel Adapters + registry) ·
+`internal/channel` (pipeline) · `internal/script` (goja) ·
+`internal/store` (SQLite) · `internal/queue` (delivery workers) ·
+`internal/engine` (composition root) · `internal/api` (REST/SSE + web UI)
+· `internal/tui` (observer).
+
+Delivery is at-least-once: a crash between a successful send and its
+acknowledgment in the store can re-send one message on restart. Design
+receivers idempotent (HL7 receivers generally are, keyed on MSH-10).
