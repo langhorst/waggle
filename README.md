@@ -40,13 +40,13 @@ replay.
 |----------------------------|-------------------------------------------------------------------|
 | Message                    | `internal/message.Message` — raw bytes + canonical tree + states  |
 | Message Channel            | Go channels + the per-destination SQLite queue                    |
-| Channel Adapter (inbound)  | `mllp-listener`, `file-reader` (`internal/adapter/...`)           |
+| Channel Adapter (inbound)  | `mllp-listener`, `astm-listener`, `file-reader`                   |
 | Polling Consumer           | the `file-reader` source                                          |
 | Pipes and Filters          | the channel pipeline (`internal/channel`)                         |
 | Message Filter             | `filter:` script — distinct step, drops retain the message        |
 | Message Translator         | `transformers:` script chain (goja JavaScript)                    |
 | Recipient List             | `destinations:` — each with its own filter/translator chain       |
-| Channel Adapter (outbound) | `mllp-sender`, `file-writer`                                      |
+| Channel Adapter (outbound) | `mllp-sender`, `astm-sender`, `file-writer`                       |
 | Guaranteed Delivery        | SQLite-backed per-destination queues with retry/backoff           |
 | Dead Letter Channel        | exhausted retries & application NAKs (`dead_letter`, requeueable) |
 | Invalid Message Channel    | parse/script failures (state `ERROR`, replayable)                 |
@@ -102,6 +102,25 @@ can reject with a meaningful `AR`, and destinations marked
 `waitForAck: true` deliver synchronously (single attempt — the upstream
 sender owns retry) with their outcome deciding the ACK. Non-waiting
 destinations always go through the queue.
+
+**ASTM E1381 transport.** `astm-listener` / `astm-sender` speak the CLSI
+LIS01-A2 low-level protocol over TCP: ENQ/ACK establishment, checksummed
+STX…ETB/ETX frames with mod-8 frame numbers and NAK retransmission, EOT
+termination — one session per E1394 message. The listener delivers the
+assembled message *before* acknowledging the final frame (a recording
+failure NAKs it), and in `ackMode: destination` a pipeline rejection
+answers EOT — the E1381 receiver interrupt — since the protocol has no
+application-status channel. Sender-side failures (busy NAK, retry
+exhaustion, interrupts, timeouts) are all transient: the delivery queue
+retries with backoff and dead-letters after `maxAttempts`.
+
+**Lab bridge example** (`examples/channels/astm-to-mllp.yaml` and
+`mllp-to-astm.yaml`): results arriving as E1394 over E1381 are converted to
+HL7 ORU^R01 by `scripts/astm-to-hl7.js` and forwarded over MLLP — and the
+reverse channel converts HL7 back to E1394 for delivery over E1381. The
+same scripts are exercised end-to-end by `TestASTMBridgeRoundTrip`, which
+chains both channels and checks the fields that come out the far side
+against what went in.
 
 **Delivery.** Each queueing destination has exactly one worker draining
 its FIFO queue: transient failures back off exponentially (jittered,

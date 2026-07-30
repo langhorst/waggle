@@ -120,6 +120,10 @@ func (l *Listener) Start(ctx context.Context, deliver adapter.DeliverFunc) error
 			go func() {
 				defer l.wg.Done()
 				defer conn.Close()
+				// Stop must not hang on connections a peer keeps open:
+				// closing them unblocks the frame read below.
+				unregister := context.AfterFunc(runCtx, func() { conn.Close() })
+				defer unregister()
 				l.serve(runCtx, conn, deliver)
 			}()
 		}

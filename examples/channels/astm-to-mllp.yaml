@@ -1,0 +1,21 @@
+# Lab bridge, instrument side: receive ASTM E1394 results over the E1381
+# framed transport, convert them to HL7 v2 ORU^R01, and forward over MLLP.
+id: astm-to-mllp
+name: ASTM instrument → HL7 (MLLP)
+source:
+  type: astm-listener
+  dataType: astm
+  settings:
+    addr: ":6662"
+transformers:
+  - scripts/astm-to-hl7.js
+destinations:
+  - id: to-his
+    dataType: hl7v2
+    adapter:
+      type: mllp-sender
+      settings:
+        addr: "127.0.0.1:6661"
+    queue:
+      maxAttempts: 10
+      retryInterval: 1s

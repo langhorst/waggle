@@ -30,6 +30,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	// Register the built-in adapters and format modules.
+	_ "github.com/langhorst/integration-channel/internal/adapter/astm1381"
 	_ "github.com/langhorst/integration-channel/internal/adapter/file"
 	_ "github.com/langhorst/integration-channel/internal/adapter/mllp"
 	_ "github.com/langhorst/integration-channel/internal/format/astm"
