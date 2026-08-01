@@ -1,4 +1,4 @@
-# integration-channel daemon configuration.
+# Waggle daemon configuration.
 listen: ":8420"          # HTTP API + web UI
 dataDir: data            # SQLite message store lives here
 channelsDir: channels    # one YAML file per channel

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/langhorst/integration-channel/internal/format"
-	"github.com/langhorst/integration-channel/internal/message"
+	"github.com/langhorst/waggle/internal/format"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 // Stage selects which representation of a stored message to inspect:

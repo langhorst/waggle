@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/events"
+	"github.com/langhorst/waggle/internal/events"
 )
 
 // handleEvents streams the event bus over Server-Sent Events. With a {id}

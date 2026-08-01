@@ -1,11 +1,11 @@
-// Command integration-channel is the self-contained integration engine
+// Command waggle is the self-contained integration engine
 // daemon. It hosts multiple channels defined by YAML files, exposes the
 // HTTP API and web UI (phase 6/7), and can alternatively run with the
 // embedded TUI observer attached (phase 5).
 //
 // Usage:
 //
-//	integration-channel [daemon] [-config daemon.yaml]
+//	waggle [daemon] [-config daemon.yaml]
 package main
 
 import (
@@ -20,22 +20,22 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/api"
-	"github.com/langhorst/integration-channel/internal/config"
-	"github.com/langhorst/integration-channel/internal/engine"
-	"github.com/langhorst/integration-channel/internal/script"
-	"github.com/langhorst/integration-channel/internal/store"
-	"github.com/langhorst/integration-channel/internal/tui"
+	"github.com/langhorst/waggle/internal/api"
+	"github.com/langhorst/waggle/internal/config"
+	"github.com/langhorst/waggle/internal/engine"
+	"github.com/langhorst/waggle/internal/script"
+	"github.com/langhorst/waggle/internal/store"
+	"github.com/langhorst/waggle/internal/tui"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	// Register the built-in adapters and format modules.
-	_ "github.com/langhorst/integration-channel/internal/adapter/astm1381"
-	_ "github.com/langhorst/integration-channel/internal/adapter/file"
-	_ "github.com/langhorst/integration-channel/internal/adapter/mllp"
-	_ "github.com/langhorst/integration-channel/internal/format/astm"
-	_ "github.com/langhorst/integration-channel/internal/format/csvfmt"
-	_ "github.com/langhorst/integration-channel/internal/format/hl7v2"
+	_ "github.com/langhorst/waggle/internal/adapter/astm1381"
+	_ "github.com/langhorst/waggle/internal/adapter/file"
+	_ "github.com/langhorst/waggle/internal/adapter/mllp"
+	_ "github.com/langhorst/waggle/internal/format/astm"
+	_ "github.com/langhorst/waggle/internal/format/csvfmt"
+	_ "github.com/langhorst/waggle/internal/format/hl7v2"
 )
 
 func main() {

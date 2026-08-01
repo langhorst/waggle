@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/message"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 func openTest(t *testing.T) *Store {

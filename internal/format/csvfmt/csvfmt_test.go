@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/langhorst/integration-channel/internal/message"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 var dt = DataType{}

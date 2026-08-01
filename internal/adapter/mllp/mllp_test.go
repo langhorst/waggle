@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/adapter"
+	"github.com/langhorst/waggle/internal/adapter"
 )
 
 const sampleMsg = "MSH|^~\\&|SEND|SFAC|RECV|RFAC|20260730||ADT^A01|CTRL001|P|2.5\rPID|1||X\r"

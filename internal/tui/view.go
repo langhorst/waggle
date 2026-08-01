@@ -6,8 +6,8 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/langhorst/integration-channel/internal/channel"
-	"github.com/langhorst/integration-channel/internal/message"
+	"github.com/langhorst/waggle/internal/channel"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 var (
@@ -52,7 +52,7 @@ func (m Model) View() string {
 	case viewDetail:
 		body = m.viewDetail()
 	}
-	out := titleStyle.Render("integration-channel — observer") + "\n\n" + body
+	out := titleStyle.Render("waggle — observer") + "\n\n" + body
 	if m.errText != "" {
 		out += "\n" + errStyle.Render("error: "+m.errText)
 	}

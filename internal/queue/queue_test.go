@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/adapter"
-	"github.com/langhorst/integration-channel/internal/message"
-	"github.com/langhorst/integration-channel/internal/store"
+	"github.com/langhorst/waggle/internal/adapter"
+	"github.com/langhorst/waggle/internal/message"
+	"github.com/langhorst/waggle/internal/store"
 )
 
 // scriptedAdapter fails the first failN sends per payload, then succeeds.

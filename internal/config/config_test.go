@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	_ "github.com/langhorst/integration-channel/internal/format/csvfmt"
-	_ "github.com/langhorst/integration-channel/internal/format/hl7v2"
+	_ "github.com/langhorst/waggle/internal/format/csvfmt"
+	_ "github.com/langhorst/waggle/internal/format/hl7v2"
 )
 
 const validChannel = `

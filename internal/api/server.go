@@ -16,10 +16,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/engine"
-	"github.com/langhorst/integration-channel/internal/message"
-	"github.com/langhorst/integration-channel/internal/script"
-	"github.com/langhorst/integration-channel/internal/store"
+	"github.com/langhorst/waggle/internal/engine"
+	"github.com/langhorst/waggle/internal/message"
+	"github.com/langhorst/waggle/internal/script"
+	"github.com/langhorst/waggle/internal/store"
 )
 
 // Server wires the engine into HTTP handlers.

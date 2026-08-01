@@ -13,7 +13,7 @@ func TestWebDashboard(t *testing.T) {
 		t.Fatalf("dashboard = %d", code)
 	}
 	page := string(raw)
-	for _, want := range []string{"integration-channel", "feed", "STARTED", "/static/htmx.min.js", "/static/flowbite.min.css", "EventSource"} {
+	for _, want := range []string{"Waggle", "feed", "STARTED", "/static/htmx.min.js", "/static/flowbite.min.css", "EventSource"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("dashboard missing %q", want)
 		}

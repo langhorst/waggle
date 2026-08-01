@@ -8,9 +8,9 @@ import (
 
 	"github.com/dop251/goja"
 
-	"github.com/langhorst/integration-channel/internal/channel"
-	"github.com/langhorst/integration-channel/internal/format"
-	"github.com/langhorst/integration-channel/internal/message"
+	"github.com/langhorst/waggle/internal/channel"
+	"github.com/langhorst/waggle/internal/format"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 // env is the per-execution binding state: the msg wrapper, any messages the

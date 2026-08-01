@@ -9,17 +9,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/channel"
-	"github.com/langhorst/integration-channel/internal/config"
-	"github.com/langhorst/integration-channel/internal/events"
-	"github.com/langhorst/integration-channel/internal/script"
-	"github.com/langhorst/integration-channel/internal/store"
+	"github.com/langhorst/waggle/internal/channel"
+	"github.com/langhorst/waggle/internal/config"
+	"github.com/langhorst/waggle/internal/events"
+	"github.com/langhorst/waggle/internal/script"
+	"github.com/langhorst/waggle/internal/store"
 
-	_ "github.com/langhorst/integration-channel/internal/adapter/file"
-	_ "github.com/langhorst/integration-channel/internal/adapter/mllp"
-	_ "github.com/langhorst/integration-channel/internal/format/astm"
-	_ "github.com/langhorst/integration-channel/internal/format/csvfmt"
-	_ "github.com/langhorst/integration-channel/internal/format/hl7v2"
+	_ "github.com/langhorst/waggle/internal/adapter/file"
+	_ "github.com/langhorst/waggle/internal/adapter/mllp"
+	_ "github.com/langhorst/waggle/internal/format/astm"
+	_ "github.com/langhorst/waggle/internal/format/csvfmt"
+	_ "github.com/langhorst/waggle/internal/format/hl7v2"
 )
 
 const sampleHL7 = "MSH|^~\\&|SEND|SFAC|RECV|RFAC|20260730||ADT^A01|CTRL001|P|2.5\rPID|1||MRN1||DOE^JOHN\r"

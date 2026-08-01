@@ -8,7 +8,7 @@ package events
 import (
 	"sync"
 
-	"github.com/langhorst/integration-channel/internal/message"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 // Type classifies an event.

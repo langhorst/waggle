@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/message"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 // QueueItem is the head of one destination's delivery queue.

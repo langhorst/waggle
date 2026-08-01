@@ -9,14 +9,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/adapter"
-	"github.com/langhorst/integration-channel/internal/adapter/astm1381"
-	"github.com/langhorst/integration-channel/internal/adapter/mllp"
-	"github.com/langhorst/integration-channel/internal/config"
-	"github.com/langhorst/integration-channel/internal/format"
-	"github.com/langhorst/integration-channel/internal/message"
-	"github.com/langhorst/integration-channel/internal/script"
-	"github.com/langhorst/integration-channel/internal/store"
+	"github.com/langhorst/waggle/internal/adapter"
+	"github.com/langhorst/waggle/internal/adapter/astm1381"
+	"github.com/langhorst/waggle/internal/adapter/mllp"
+	"github.com/langhorst/waggle/internal/config"
+	"github.com/langhorst/waggle/internal/format"
+	"github.com/langhorst/waggle/internal/message"
+	"github.com/langhorst/waggle/internal/script"
+	"github.com/langhorst/waggle/internal/store"
 )
 
 // instrumentSide is a test E1381 receiver playing the instrument.

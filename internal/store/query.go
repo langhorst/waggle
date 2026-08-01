@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/message"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 // MessageSummary is one row of the message list.

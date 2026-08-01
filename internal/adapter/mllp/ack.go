@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/format/hl7v2"
-	"github.com/langhorst/integration-channel/internal/message"
+	"github.com/langhorst/waggle/internal/format/hl7v2"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 var hl7 = hl7v2.DataType{}

@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/adapter"
-	"github.com/langhorst/integration-channel/internal/events"
-	"github.com/langhorst/integration-channel/internal/format"
-	"github.com/langhorst/integration-channel/internal/message"
+	"github.com/langhorst/waggle/internal/adapter"
+	"github.com/langhorst/waggle/internal/events"
+	"github.com/langhorst/waggle/internal/format"
+	"github.com/langhorst/waggle/internal/message"
 
-	_ "github.com/langhorst/integration-channel/internal/format/csvfmt"
-	_ "github.com/langhorst/integration-channel/internal/format/hl7v2"
+	_ "github.com/langhorst/waggle/internal/format/csvfmt"
+	_ "github.com/langhorst/waggle/internal/format/hl7v2"
 )
 
 const sampleHL7 = "MSH|^~\\&|SEND|SFAC|RECV|RFAC|20260730||ADT^A01|CTRL001|P|2.5\rPID|1||MRN1||DOE^JOHN\r"

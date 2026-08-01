@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/langhorst/integration-channel/internal/adapter/mllp"
-	"github.com/langhorst/integration-channel/internal/config"
-	"github.com/langhorst/integration-channel/internal/script"
-	"github.com/langhorst/integration-channel/internal/store"
+	"github.com/langhorst/waggle/internal/adapter/mllp"
+	"github.com/langhorst/waggle/internal/config"
+	"github.com/langhorst/waggle/internal/script"
+	"github.com/langhorst/waggle/internal/store"
 )
 
 // TestMLLPToFileEndToEnd is the plan's verification scenario: an MLLP

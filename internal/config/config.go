@@ -13,8 +13,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/langhorst/integration-channel/internal/adapter"
-	"github.com/langhorst/integration-channel/internal/format"
+	"github.com/langhorst/waggle/internal/adapter"
+	"github.com/langhorst/waggle/internal/format"
 )
 
 // Daemon is the top-level daemon configuration.

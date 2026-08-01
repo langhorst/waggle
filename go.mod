@@ -1,4 +1,4 @@
-module github.com/langhorst/integration-channel
+module github.com/langhorst/waggle
 
 go 1.25.0
 

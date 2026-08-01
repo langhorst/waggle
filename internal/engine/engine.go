@@ -11,13 +11,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/adapter"
-	"github.com/langhorst/integration-channel/internal/channel"
-	"github.com/langhorst/integration-channel/internal/config"
-	"github.com/langhorst/integration-channel/internal/events"
-	"github.com/langhorst/integration-channel/internal/format"
-	"github.com/langhorst/integration-channel/internal/queue"
-	"github.com/langhorst/integration-channel/internal/store"
+	"github.com/langhorst/waggle/internal/adapter"
+	"github.com/langhorst/waggle/internal/channel"
+	"github.com/langhorst/waggle/internal/config"
+	"github.com/langhorst/waggle/internal/events"
+	"github.com/langhorst/waggle/internal/format"
+	"github.com/langhorst/waggle/internal/queue"
+	"github.com/langhorst/waggle/internal/store"
 )
 
 // ScriptEngine compiles referenced script files into pipeline steps. The

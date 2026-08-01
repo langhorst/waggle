@@ -6,10 +6,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/langhorst/integration-channel/internal/engine"
-	"github.com/langhorst/integration-channel/internal/events"
-	"github.com/langhorst/integration-channel/internal/message"
-	"github.com/langhorst/integration-channel/internal/store"
+	"github.com/langhorst/waggle/internal/engine"
+	"github.com/langhorst/waggle/internal/events"
+	"github.com/langhorst/waggle/internal/message"
+	"github.com/langhorst/waggle/internal/store"
 )
 
 type view int

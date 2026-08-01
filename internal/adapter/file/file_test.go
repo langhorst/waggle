@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/adapter"
+	"github.com/langhorst/waggle/internal/adapter"
 )
 
 func writeInput(t *testing.T, dir, name, content string) {

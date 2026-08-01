@@ -12,10 +12,10 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/adapter"
-	"github.com/langhorst/integration-channel/internal/events"
-	"github.com/langhorst/integration-channel/internal/message"
-	"github.com/langhorst/integration-channel/internal/store"
+	"github.com/langhorst/waggle/internal/adapter"
+	"github.com/langhorst/waggle/internal/events"
+	"github.com/langhorst/waggle/internal/message"
+	"github.com/langhorst/waggle/internal/store"
 )
 
 // Worker drains one destination's queue. Exactly one Worker may run per

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/adapter"
+	"github.com/langhorst/waggle/internal/adapter"
 )
 
 func init() {

@@ -34,8 +34,8 @@ import (
 
 	"github.com/dop251/goja"
 
-	"github.com/langhorst/integration-channel/internal/channel"
-	"github.com/langhorst/integration-channel/internal/message"
+	"github.com/langhorst/waggle/internal/channel"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 // Options configures the script engine.

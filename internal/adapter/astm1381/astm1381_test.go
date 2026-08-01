@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/adapter"
+	"github.com/langhorst/waggle/internal/adapter"
 )
 
 const sampleMsg = "H|\\^&|||LIS|||||||P|LIS2-A2|20260730\rP|1||PATID123||DOE^JOHN\rR|1|^^^GLU|105|mg/dL\rL|1|N\r"

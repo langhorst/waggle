@@ -1,6 +1,7 @@
-# integration-channel
+# Waggle 🐝
 
-A self-contained integration engine in Go, inspired by Mirth Connect and
+A self-contained integration engine in Go — named for the honeybee waggle
+dance, nature's own message routing — inspired by Mirth Connect and
 built strictly on the vocabulary of *Enterprise Integration Patterns*
 (Hohpe & Woolf). One binary, no external dependencies at runtime, fully
 offline: a headless daemon hosts any number of **channels**, each moving
@@ -21,13 +22,15 @@ of outbound Channel Adapters with **Guaranteed Delivery**.
 ## Quick start
 
 ```sh
-go build ./cmd/integration-channel
+go build ./cmd/waggle
 
 cd examples
-../integration-channel daemon            # web UI on http://localhost:8420
+../waggle daemon            # web UI on http://localhost:8420
 # or attach the read-only observer TUI (engine runs in-process):
-../integration-channel tui
+../waggle tui
 ```
+
+Module path: `github.com/langhorst/waggle`.
 
 Drop an HL7 file into a file-reader channel's directory, or fire messages
 at an MLLP listener, and watch them flow in the UI: live message list,

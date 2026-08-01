@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/langhorst/integration-channel/internal/adapter"
+	"github.com/langhorst/waggle/internal/adapter"
 )
 
 // WriterConfig configures the file writer destination. Pattern names the
