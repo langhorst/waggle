@@ -22,15 +22,13 @@ of outbound Channel Adapters with **Guaranteed Delivery**.
 ## Quick start
 
 ```sh
-go build ./cmd/waggle
-
-cd examples
-../waggle daemon            # web UI on http://localhost:8420
-# or attach the read-only observer TUI (engine runs in-process):
-../waggle tui
+make run    # build + run the daemon on the examples/ config — web UI on http://localhost:8420
+make tui    # or attach the read-only observer TUI (engine runs in-process)
 ```
 
-Module path: `github.com/langhorst/waggle`.
+(Or without make: `go build -o bin/waggle ./cmd/waggle`, then run
+`../bin/waggle daemon` from `examples/`.) Module path:
+`github.com/langhorst/waggle`.
 
 Drop an HL7 file into a file-reader channel's directory, or fire messages
 at an MLLP listener, and watch them flow in the UI: live message list,
@@ -184,12 +182,15 @@ messages forever; queue-referenced messages are never pruned.
 ## Development
 
 ```sh
-go test ./...            # unit, functional, and E2E tests (no network needed)
-go test -race ./...
-go vet ./...
-go test ./internal/format/... -fuzz=FuzzParse -fuzztime=30s   # parser fuzzing
-go test ./internal/format/hl7v2 ./internal/channel -bench=. -run=NONE
+make check    # the pre-push gate: gofmt check + go vet + race-enabled tests
+make test     # plain test run (unit, functional, E2E — no network needed)
+make cover    # race tests with a coverage summary
+make fuzz     # 30s of parser fuzzing per format (FUZZTIME=2m make fuzz for longer)
+make bench    # parser + pipeline benchmarks
 ```
+
+`make help` lists everything; the plain `go test ./...` / `go vet ./...`
+commands behind these targets work as ever.
 
 Package map: `internal/message` (tree, states, diff) · `internal/format/*`
 (data types) · `internal/adapter/*` (Channel Adapters + registry) ·
