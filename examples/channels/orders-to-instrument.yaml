@@ -1,0 +1,23 @@
+# Order download: HL7 ORM^O01 orders arriving over MLLP are converted to
+# ASTM E1394 order messages and delivered to the instrument over the E1381
+# framed transport.
+id: orders-to-instrument
+name: HL7 orders (MLLP) → ASTM instrument
+source:
+  type: mllp-listener
+  dataType: hl7v2
+  settings:
+    addr: ":6665"
+    ackMode: immediate
+transformers:
+  - scripts/hl7-orm-to-astm.js
+destinations:
+  - id: to-instrument
+    dataType: astm
+    adapter:
+      type: astm-sender
+      settings:
+        addr: "127.0.0.1:6664"
+    queue:
+      maxAttempts: 10
+      retryInterval: 1s

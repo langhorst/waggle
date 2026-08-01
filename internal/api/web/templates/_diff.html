@@ -1,0 +1,29 @@
+{{define "_diff.html"}}
+{{if .Error}}
+<div class="p-4 text-sm text-red-800 rounded-lg bg-red-50 dark:bg-gray-800 dark:text-red-400">{{.Error}}</div>
+{{else if not .Diff}}
+<p class="text-sm text-gray-400">no differences between received and transformed</p>
+{{else}}
+<div class="relative overflow-x-auto shadow-md sm:rounded-lg">
+  <table class="w-full text-sm text-left text-gray-500 dark:text-gray-400">
+    <thead class="text-xs text-gray-700 uppercase bg-gray-100 dark:bg-gray-700 dark:text-gray-400">
+      <tr><th class="px-4 py-2 w-8"></th><th class="px-4 py-2">Path</th><th class="px-4 py-2">From</th><th class="px-4 py-2">To</th></tr>
+    </thead>
+    <tbody class="font-mono text-xs">
+      {{range .Diff}}
+      <tr class="bg-white border-b dark:bg-gray-800 dark:border-gray-700">
+        <td class="px-4 py-2">
+          {{if eq .Op "changed"}}<span class="text-yellow-500 font-bold">~</span>
+          {{else if eq .Op "added"}}<span class="text-green-500 font-bold">+</span>
+          {{else}}<span class="text-red-500 font-bold">−</span>{{end}}
+        </td>
+        <td class="px-4 py-2 font-semibold text-gray-900 dark:text-white">{{.Path}}</td>
+        <td class="px-4 py-2 {{if eq .Op "added"}}text-gray-300{{else}}text-red-600 dark:text-red-400{{end}}">{{.From}}</td>
+        <td class="px-4 py-2 {{if eq .Op "removed"}}text-gray-300{{else}}text-green-600 dark:text-green-400{{end}}">{{.To}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}
+{{end}}

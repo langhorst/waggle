@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/langhorst/integration-channel/internal/message"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 // DataType is a format module. Parsing and serialization happen exclusively

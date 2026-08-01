@@ -1,0 +1,63 @@
+{{define "content"}}
+<div class="flex items-center justify-between mb-2">
+  <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Message #{{.Detail.ID}}</h1>
+  <div class="flex items-center gap-3">
+    <span id="replay-result"></span>
+    <button hx-post="/ui/messages/{{.Detail.ID}}/replay" hx-target="#replay-result"
+      class="text-white bg-blue-700 hover:bg-blue-800 font-medium rounded-lg text-sm px-4 py-2 dark:bg-blue-600 dark:hover:bg-blue-700">
+      Replay
+    </button>
+  </div>
+</div>
+<p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+  channel <a href="/channels/{{.Detail.ChannelID}}" class="text-blue-600 hover:underline dark:text-blue-400">{{.Detail.ChannelID}}</a>
+  · {{stateBadge .Detail.State}}
+  · correlation <code>{{.Detail.CorrelationID}}</code>
+  · received {{timefmt .Detail.ReceivedAt}}
+  {{if .Detail.ReplayOf}}· replay of <a href="/messages/{{.Detail.ReplayOf}}" class="text-blue-600 hover:underline">#{{.Detail.ReplayOf}}</a>{{end}}
+</p>
+{{if .Detail.ErrorText}}
+<div class="p-4 mb-4 text-sm text-red-800 rounded-lg bg-red-50 dark:bg-gray-800 dark:text-red-400" role="alert">
+  {{.Detail.ErrorText}}
+</div>
+{{end}}
+
+<div class="mb-4 border-b border-gray-200 dark:border-gray-700">
+  <ul class="flex flex-wrap -mb-px text-sm font-medium text-center" id="detail-tabs"
+      data-tabs-toggle="#detail-tab-content" role="tablist">
+    <li class="me-2"><button class="inline-block p-4 border-b-2 rounded-t-lg" id="raw-tab" data-tabs-target="#tab-raw" type="button" role="tab">Raw</button></li>
+    <li class="me-2"><button class="inline-block p-4 border-b-2 rounded-t-lg" id="tree-tab" data-tabs-target="#tab-tree" type="button" role="tab">Tree</button></li>
+    <li class="me-2"><button class="inline-block p-4 border-b-2 rounded-t-lg" id="diff-tab" data-tabs-target="#tab-diff" type="button" role="tab">Diff</button></li>
+    <li class="me-2"><button class="inline-block p-4 border-b-2 rounded-t-lg" id="dest-tab" data-tabs-target="#tab-dest" type="button" role="tab">Destinations</button></li>
+  </ul>
+</div>
+<div id="detail-tab-content">
+  <div class="hidden" id="tab-raw" role="tabpanel">
+    <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-1">Raw inbound ({{.Detail.DataType}})</h3>
+    <pre class="p-4 mb-4 overflow-x-auto text-xs bg-gray-900 text-green-300 rounded-lg whitespace-pre-wrap">{{printf "%s" .Raw}}</pre>
+    {{if .Transformed}}
+    <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-1">Transformed{{if .Detail.TransformedDataType}} ({{.Detail.TransformedDataType}}){{end}}</h3>
+    <pre class="p-4 overflow-x-auto text-xs bg-gray-900 text-blue-300 rounded-lg whitespace-pre-wrap">{{printf "%s" .Transformed}}</pre>
+    {{end}}
+  </div>
+  <div class="hidden" id="tab-tree" role="tabpanel">
+    <div class="mb-2 flex gap-2">
+      {{$id := .Detail.ID}}
+      {{range .Stages}}
+      <button hx-get="/ui/messages/{{$id}}/tree?stage={{.}}" hx-target="#tree-content"
+        class="px-3 py-1 text-xs font-medium text-gray-900 bg-white border border-gray-200 rounded-lg hover:bg-gray-100 dark:bg-gray-800 dark:text-white dark:border-gray-600">{{.}}</button>
+      {{end}}
+    </div>
+    <div id="tree-content" hx-get="/ui/messages/{{.Detail.ID}}/tree?stage=received" hx-trigger="load" hx-swap="innerHTML"></div>
+  </div>
+  <div class="hidden" id="tab-diff" role="tabpanel">
+    <div id="diff-content" hx-get="/ui/messages/{{.Detail.ID}}/diff" hx-trigger="load" hx-swap="innerHTML"></div>
+  </div>
+  <div class="hidden" id="tab-dest" role="tabpanel">
+    <div id="dest-content"
+         hx-get="/ui/messages/{{.Detail.ID}}/destinations"
+         hx-trigger="load, sse-message from:body delay:300ms"
+         hx-swap="innerHTML"></div>
+  </div>
+</div>
+{{end}}

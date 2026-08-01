@@ -11,8 +11,8 @@
 // characters, exactly like MSH-1/MSH-2.
 //
 // This module covers the record format only; the E1381 checksummed-frame
-// transport is a future transport adapter, so v1 moves ASTM through file
-// adapters.
+// transport lives in internal/adapter/astm1381 (astm-listener/astm-sender),
+// and file adapters carry ASTM equally well.
 package astm
 
 import (
@@ -21,9 +21,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/langhorst/integration-channel/internal/format"
-	"github.com/langhorst/integration-channel/internal/format/delimited"
-	"github.com/langhorst/integration-channel/internal/message"
+	"github.com/langhorst/waggle/internal/format"
+	"github.com/langhorst/waggle/internal/format/delimited"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 func init() { format.Register(DataType{}) }

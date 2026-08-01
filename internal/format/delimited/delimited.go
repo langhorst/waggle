@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/langhorst/integration-channel/internal/message"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 // Delims holds the separator characters in effect for one message. HL7 reads

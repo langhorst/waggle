@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/langhorst/integration-channel/internal/message"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files")
@@ -127,8 +127,8 @@ func TestResolve(t *testing.T) {
 		{"PID-3", "MRN12345^^^HOSP^MR"}, // first repetition
 		{"PID-3[2].1", "SSN987654"},
 		{"PID-7", "20200101"},
-		{"PID-7.1", "20200101"}, // component 1 of a leaf is the leaf itself
-		{"PID-7.2", ""},         // beyond a leaf: missing
+		{"PID-7.1", "20200101"},                // component 1 of a leaf is the leaf itself
+		{"PID-7.2", ""},                        // beyond a leaf: missing
 		{"OBX-5", "Patient admitted & stable"}, // \T\ decoded
 		{"OBX[2]-5", "72.5"},
 		{"OBX[2]-3.1.2", "BODY"}, // subcomponent

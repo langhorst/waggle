@@ -1,0 +1,22 @@
+{{define "_tree.html"}}
+{{if .Error}}
+<div class="p-4 text-sm text-red-800 rounded-lg bg-red-50 dark:bg-gray-800 dark:text-red-400">{{.Error}}</div>
+{{else}}
+<p class="text-xs text-gray-400 mb-2">parsed as {{.DataType}}</p>
+<div class="p-4 bg-white rounded-lg shadow dark:bg-gray-800 text-sm font-mono overflow-x-auto">
+  {{range .Tree.Children}}{{template "treeNode" .}}{{end}}
+</div>
+{{end}}
+{{end}}
+
+{{define "treeNode"}}
+<div class="ps-4 border-s border-gray-200 dark:border-gray-700">
+  {{if .IsLeaf}}
+  <span class="text-gray-500 dark:text-gray-400">{{.Name}}:</span>
+  <span class="text-gray-900 dark:text-gray-100">{{.Value}}</span>
+  {{else}}
+  <span class="font-semibold text-blue-700 dark:text-blue-400">{{.Name}}</span>
+  {{range .Children}}{{template "treeNode" .}}{{end}}
+  {{end}}
+</div>
+{{end}}

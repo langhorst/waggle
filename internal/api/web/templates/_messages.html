@@ -1,0 +1,31 @@
+{{define "_messages.html"}}
+<div class="relative overflow-x-auto shadow-md sm:rounded-lg">
+  <table class="w-full text-sm text-left text-gray-500 dark:text-gray-400">
+    <thead class="text-xs text-gray-700 uppercase bg-gray-100 dark:bg-gray-700 dark:text-gray-400">
+      <tr>
+        <th class="px-6 py-3">ID</th>
+        <th class="px-6 py-3">State</th>
+        <th class="px-6 py-3">Received</th>
+        <th class="px-6 py-3">Info</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Messages}}
+      <tr class="bg-white border-b dark:bg-gray-800 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700">
+        <td class="px-6 py-3 font-medium">
+          <a href="/messages/{{.ID}}" class="text-blue-600 hover:underline dark:text-blue-400">#{{.ID}}</a>
+        </td>
+        <td class="px-6 py-3">{{stateBadge .State}}</td>
+        <td class="px-6 py-3 whitespace-nowrap">{{timefmt .ReceivedAt}}</td>
+        <td class="px-6 py-3 text-xs">
+          {{if .ErrorText}}<span class="text-red-600 dark:text-red-400">{{.ErrorText}}</span>
+          {{else if .ReplayOf}}replay of <a href="/messages/{{.ReplayOf}}" class="text-blue-600 hover:underline">#{{.ReplayOf}}</a>{{end}}
+        </td>
+      </tr>
+      {{else}}
+      <tr class="bg-white dark:bg-gray-800"><td colspan="4" class="px-6 py-4 text-center">no messages</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}

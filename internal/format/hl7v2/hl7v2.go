@@ -10,9 +10,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/langhorst/integration-channel/internal/format"
-	"github.com/langhorst/integration-channel/internal/format/delimited"
-	"github.com/langhorst/integration-channel/internal/message"
+	"github.com/langhorst/waggle/internal/format"
+	"github.com/langhorst/waggle/internal/format/delimited"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 func init() { format.Register(DataType{}) }

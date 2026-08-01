@@ -1,0 +1,26 @@
+# Query → response: an instrument asks "which orders for this specimen?"
+# by sending an ASTM query message (H/Q/L) over E1381. Because E1381 is
+# half-duplex, request-reply is two opposite sessions: the query arrives on
+# this channel's listener, and the order response goes back out through the
+# astm-sender destination as a fresh session to the instrument's own
+# receiving port. The filter keeps non-query traffic out of the responder.
+id: instrument-query
+name: ASTM query → order response
+source:
+  type: astm-listener
+  dataType: astm
+  settings:
+    addr: ":6666"
+filter: scripts/only-queries.js
+transformers:
+  - scripts/astm-query-to-order.js
+destinations:
+  - id: order-response
+    dataType: astm
+    adapter:
+      type: astm-sender
+      settings:
+        addr: "127.0.0.1:6667"   # the instrument's E1381 receive port
+    queue:
+      maxAttempts: 10
+      retryInterval: 1s

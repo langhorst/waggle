@@ -1,0 +1,17 @@
+{{define "content"}}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Channel {{.ChannelID}}</h1>
+  <div class="flex items-center gap-3">
+    <a href="/channels/{{.ChannelID}}?state=ERROR"
+       class="text-sm {{if eq .State "ERROR"}}font-bold {{end}}text-red-600 hover:underline dark:text-red-400">errors only</a>
+    <a href="/channels/{{.ChannelID}}" class="text-sm text-blue-600 hover:underline dark:text-blue-400">all messages</a>
+    <a href="/channels/{{.ChannelID}}/dlq" class="text-sm text-red-600 hover:underline dark:text-red-400">dead letters</a>
+  </div>
+</div>
+<div id="messages"
+     hx-get="/ui/channels/{{.ChannelID}}/messages?state={{.State}}"
+     hx-trigger="load, sse-message from:body delay:300ms"
+     hx-swap="innerHTML">
+  <p class="text-sm text-gray-400">loading…</p>
+</div>
+{{end}}

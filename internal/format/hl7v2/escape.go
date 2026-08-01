@@ -4,7 +4,7 @@ import (
 	"encoding/hex"
 	"strings"
 
-	"github.com/langhorst/integration-channel/internal/format/delimited"
+	"github.com/langhorst/waggle/internal/format/delimited"
 )
 
 // decoder translates HL7 escape sequences to literal bytes using the

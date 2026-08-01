@@ -1,0 +1,38 @@
+{{define "_destinations.html"}}
+{{if not .Destinations}}
+<p class="text-sm text-gray-400">no destination activity recorded</p>
+{{else}}
+<div class="relative overflow-x-auto shadow-md sm:rounded-lg">
+  <table class="w-full text-sm text-left text-gray-500 dark:text-gray-400">
+    <thead class="text-xs text-gray-700 uppercase bg-gray-100 dark:bg-gray-700 dark:text-gray-400">
+      <tr>
+        <th class="px-6 py-3">Destination</th>
+        <th class="px-6 py-3">State</th>
+        <th class="px-6 py-3 text-right">Attempts</th>
+        <th class="px-6 py-3">Queued</th>
+        <th class="px-6 py-3">Sent</th>
+        <th class="px-6 py-3">Last error</th>
+        <th class="px-6 py-3">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{$msgID := .MessageID}}
+      {{range .Destinations}}
+      <tr class="bg-white border-b dark:bg-gray-800 dark:border-gray-700">
+        <td class="px-6 py-3 font-medium text-gray-900 dark:text-white">{{.DestinationID}}</td>
+        <td class="px-6 py-3">{{stateBadge .State}}</td>
+        <td class="px-6 py-3 text-right">{{.Attempts}}</td>
+        <td class="px-6 py-3 text-xs whitespace-nowrap">{{if .QueuedAt}}{{timefmt .QueuedAt}}{{end}}</td>
+        <td class="px-6 py-3 text-xs whitespace-nowrap">{{if .SentAt}}{{timefmt .SentAt}}{{end}}</td>
+        <td class="px-6 py-3 text-xs text-red-600 dark:text-red-400">{{.LastError}}</td>
+        <td class="px-6 py-3">
+          <button hx-post="/ui/messages/{{$msgID}}/replay?destination={{.DestinationID}}" hx-target="#replay-result"
+            class="text-xs text-blue-600 hover:underline dark:text-blue-400">Resend</button>
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}
+{{end}}

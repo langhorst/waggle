@@ -62,4 +62,10 @@ type Message struct {
 	Error         string            // pipeline error detail when State == ERROR
 	ReceivedAt    time.Time         //
 	Meta          map[string]string // source context: filename, remote address, ...
+
+	// AckCode/AckText, when set by a script (response.setAck), override the
+	// automatic ACK decision for destination-ACK sources without stopping
+	// the pipeline.
+	AckCode string
+	AckText string
 }
