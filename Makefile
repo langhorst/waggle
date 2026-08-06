@@ -4,7 +4,7 @@
 BIN     := bin/waggle
 GO      := go
 PKGS    := ./...
-FUZZPKGS := ./internal/format/hl7v2 ./internal/format/astm ./internal/format/csvfmt
+FUZZPKGS := ./internal/format/hl7v2 ./internal/format/astm ./internal/format/csvfmt ./internal/format/jsonfmt
 BENCHPKGS := ./internal/format/hl7v2 ./internal/channel
 FUZZTIME ?= 30s
 

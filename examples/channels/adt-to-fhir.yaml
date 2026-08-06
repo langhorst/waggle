@@ -1,0 +1,28 @@
+# API upload: HL7 v2 ADT admissions arriving over MLLP become FHIR
+# R4-shaped Patient resources POSTed to a REST API. A28/A31 updates are
+# routed by the transformer to PUT /fhir/Patient/{id} via meta['http.path']
+# and meta['http.method']; API rejections (4xx) dead-letter with the
+# response body, server trouble (5xx) retries with backoff.
+id: adt-to-fhir
+name: HL7 ADT (MLLP) → FHIR API
+source:
+  type: mllp-listener
+  dataType: hl7v2
+  settings:
+    addr: ":6668"
+    ackMode: immediate
+filter: scripts/only-adt.js
+transformers:
+  - scripts/adt-to-fhir-patient.js
+destinations:
+  - id: fhir-api
+    dataType: json
+    adapter:
+      type: http-sender
+      settings:
+        url: "http://127.0.0.1:8600/fhir/Patient"
+        # headers:
+        #   Authorization: "Bearer <token>"
+    queue:
+      maxAttempts: 10
+      retryInterval: 1s
