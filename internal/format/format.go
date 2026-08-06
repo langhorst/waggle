@@ -48,6 +48,16 @@ type DataType interface {
 	Flatten(root *message.Node) []message.PathValue
 }
 
+// TypedSetter is optionally implemented by data types whose wire format
+// distinguishes value types (JSON numbers/booleans/null). The script engine
+// prefers SetTyped when available so a JS number stays a number on the wire;
+// formats without it receive stringified values through Set.
+type TypedSetter interface {
+	// SetTyped behaves like Set but preserves the dynamic type of value
+	// (string, bool, nil, or any numeric type).
+	SetTyped(root *message.Node, path string, value any) error
+}
+
 var registry = map[string]DataType{}
 
 // Register adds a DataType to the registry. It panics on a duplicate name;
