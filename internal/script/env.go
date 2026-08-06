@@ -109,17 +109,21 @@ func (e *env) wrapSegment(sm *scriptMsg, seg *message.Node) map[string]any {
 	// against exactly this occurrence; the shared node pointer means sets
 	// mutate the real tree.
 	scoped := &message.Node{Name: sm.tree().Name, Children: []*message.Node{seg}}
+	join := func(segName, rel string) string { return segName + "-" + rel }
+	if j, ok := sm.dt.(format.SegmentJoiner); ok {
+		join = j.JoinSegmentPath
+	}
 	return map[string]any{
 		"name": seg.Name,
 		"get": func(rel string) (any, error) {
-			nodes, err := sm.dt.Resolve(scoped, seg.Name+"-"+rel)
+			nodes, err := sm.dt.Resolve(scoped, join(seg.Name, rel))
 			if err != nil || len(nodes) == 0 {
 				return nil, err
 			}
 			return sm.dt.Value(sm.tree(), nodes[0]), nil
 		},
 		"set": func(rel string, value goja.Value) error {
-			return setValue(sm.dt, scoped, seg.Name+"-"+rel, value)
+			return setValue(sm.dt, scoped, join(seg.Name, rel), value)
 		},
 		"value": func() string {
 			return sm.dt.Value(sm.tree(), seg)

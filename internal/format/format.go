@@ -48,6 +48,16 @@ type DataType interface {
 	Flatten(root *message.Node) []message.PathValue
 }
 
+// SegmentJoiner is optionally implemented by data types whose dialect does
+// not use the default "SEG-rel" HL7/ASTM-style join for segment-relative
+// script paths (seg.get('5.1') on a PID handle). xmlfmt joins with its
+// slash separator so seg.get('id/@value') works on an element handle.
+type SegmentJoiner interface {
+	// JoinSegmentPath builds the absolute path for rel evaluated against
+	// one segment occurrence named segName.
+	JoinSegmentPath(segName, rel string) string
+}
+
 // TypedSetter is optionally implemented by data types whose wire format
 // distinguishes value types (JSON numbers/booleans/null). The script engine
 // prefers SetTyped when available so a JS number stays a number on the wire;
