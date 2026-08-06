@@ -15,6 +15,7 @@ import (
 	_ "github.com/langhorst/waggle/internal/format/astm"
 	_ "github.com/langhorst/waggle/internal/format/csvfmt"
 	_ "github.com/langhorst/waggle/internal/format/hl7v2"
+	_ "github.com/langhorst/waggle/internal/format/jsonfmt"
 )
 
 const sampleHL7 = "MSH|^~\\&|SEND|SFAC|RECV|RFAC|20260730||ADT^A01|CTRL001|P|2.5\r" +
@@ -341,5 +342,91 @@ function transform(msg) { count++; msg.set('ZZZ-1', String(count)); }`)
 		if got := dt.Value(m.Tree, nodes[0]); got != strings.TrimSpace(string(rune('0'+i))) {
 			t.Errorf("message %d: count = %q", i, got)
 		}
+	}
+}
+
+func TestMetaWriteBack(t *testing.T) {
+	e := newTestEngine(t, Options{})
+	path := writeScript(t, `
+function transform(msg) {
+	meta['http.path'] = '/patients/' + msg.get('PID-3.1');
+	meta['attempt.count'] = 3;
+	meta['flagged'] = true;
+	delete meta['source.file'];
+}`)
+	tr, err := e.CompileTranslator(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := hl7Message(t)
+	if err := tr(m); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"http.path": "/patients/MRN1", "attempt.count": "3", "flagged": "true",
+	}
+	for k, v := range want {
+		if m.Meta[k] != v {
+			t.Errorf("meta[%s] = %q, want %q", k, m.Meta[k], v)
+		}
+	}
+	if _, ok := m.Meta["source.file"]; ok {
+		t.Error("deleted meta key survived")
+	}
+}
+
+func TestMetaUntouchedOnScriptError(t *testing.T) {
+	e := newTestEngine(t, Options{})
+	path := writeScript(t, `
+function transform(msg) {
+	meta['http.path'] = '/should/not/stick';
+	throw new Error('boom');
+}`)
+	tr, err := e.CompileTranslator(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := hl7Message(t)
+	if err := tr(m); err == nil {
+		t.Fatal("expected script error")
+	}
+	if _, ok := m.Meta["http.path"]; ok {
+		t.Error("failed script's meta write leaked into the message")
+	}
+	if m.Meta["source.file"] != "x.hl7" {
+		t.Error("original meta lost")
+	}
+}
+
+func TestTypedSetOnJSON(t *testing.T) {
+	e := newTestEngine(t, Options{})
+	path := writeScript(t, `
+function transform(msg) {
+	var out = newMessage('json');
+	out.set('name', msg.get('PID-5.1'));
+	out.set('weight', parseFloat(msg.get('OBX-5')));
+	out.set('active', true);
+	out.set('note', null);
+	return out;
+}`)
+	tr, err := e.CompileTranslator(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := hl7Message(t)
+	if err := tr(m); err != nil {
+		t.Fatal(err)
+	}
+	if m.DataType != "json" {
+		t.Fatalf("dataType = %s", m.DataType)
+	}
+	dt, _ := format.Get("json")
+	out, err := dt.Serialize(m.Tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"name":"DOE","weight":70,"active":true,"note":null}`
+	if string(out) != want {
+		t.Errorf("serialized:\n got  %s\n want %s", out, want)
 	}
 }

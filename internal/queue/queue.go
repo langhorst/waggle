@@ -86,11 +86,13 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 func (w *Worker) attempt(ctx context.Context, log *slog.Logger, item *store.QueueItem) {
-	meta := map[string]string{
-		"message.id":     fmt.Sprintf("%d", item.MessageID),
-		"channel.id":     w.ChannelID,
-		"destination.id": w.DestID,
+	meta := make(map[string]string, len(item.Meta)+3)
+	for k, v := range item.Meta {
+		meta[k] = v
 	}
+	meta["message.id"] = fmt.Sprintf("%d", item.MessageID)
+	meta["channel.id"] = w.ChannelID
+	meta["destination.id"] = w.DestID
 	err := w.Adapter.Send(ctx, item.Payload, meta)
 	switch {
 	case err == nil:

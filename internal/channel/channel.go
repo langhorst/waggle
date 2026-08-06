@@ -71,7 +71,10 @@ type Recorder interface {
 	SetTransformed(ctx context.Context, id int64, payload []byte, dataType string) error
 	// SetDestinationState records a per-destination state change; payload is
 	// the destination-serialized bytes when known.
-	SetDestinationState(ctx context.Context, id int64, destID string, state message.State, payload []byte, errText string) error
+	// meta, when non-nil, replaces the delivery's stored metadata (script
+	// meta writes that outbound adapters read, e.g. http.path); nil keeps
+	// whatever is stored.
+	SetDestinationState(ctx context.Context, id int64, destID string, state message.State, payload []byte, meta map[string]string, errText string) error
 }
 
 // Queuer hands a recorded delivery to the Guaranteed Delivery queue (the
@@ -365,19 +368,19 @@ func (c *Channel) sendTo(ctx context.Context, d *Destination, m *message.Message
 	if d.Filter != nil {
 		keep, err := d.Filter(dm)
 		if err != nil {
-			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, nil, fmt.Sprintf("filter: %v", err))
+			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, nil, nil, fmt.Sprintf("filter: %v", err))
 			c.publishDestination(m.ID, d.ID, message.StateError)
 			return fmt.Errorf("filter: %w", err)
 		}
 		if !keep {
-			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateFiltered, nil, "")
+			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateFiltered, nil, nil, "")
 			c.publishDestination(m.ID, d.ID, message.StateFiltered)
 			return nil
 		}
 	}
 	for i, translate := range d.Translate {
 		if err := translate(dm); err != nil {
-			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, nil, fmt.Sprintf("translator %d: %v", i+1, err))
+			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, nil, nil, fmt.Sprintf("translator %d: %v", i+1, err))
 			c.publishDestination(m.ID, d.ID, message.StateError)
 			return fmt.Errorf("translator %d: %w", i+1, err)
 		}
@@ -385,12 +388,12 @@ func (c *Channel) sendTo(ctx context.Context, d *Destination, m *message.Message
 
 	payload, err := d.OutType.Serialize(dm.Tree)
 	if err != nil {
-		_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, nil, fmt.Sprintf("serialize (%s): %v", d.OutType.Name(), err))
+		_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, nil, nil, fmt.Sprintf("serialize (%s): %v", d.OutType.Name(), err))
 		c.publishDestination(m.ID, d.ID, message.StateError)
 		return fmt.Errorf("serialize: %w", err)
 	}
 
-	_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateQueued, payload, "")
+	_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateQueued, payload, dm.Meta, "")
 	c.publishDestination(m.ID, d.ID, message.StateQueued)
 
 	// Guaranteed Delivery: hand non-waitForAck deliveries to the queue
@@ -398,7 +401,7 @@ func (c *Channel) sendTo(ctx context.Context, d *Destination, m *message.Message
 	// upstream sender owns retry (their outcome drives the source ACK).
 	if c.Queue != nil && !d.WaitForAck {
 		if err := c.Queue.Enqueue(ctx, c.ID, d.ID, m.ID); err != nil {
-			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, payload, err.Error())
+			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, payload, nil, err.Error())
 			c.publishDestination(m.ID, d.ID, message.StateError)
 			return fmt.Errorf("enqueue: %w", err)
 		}
@@ -410,11 +413,11 @@ func (c *Channel) sendTo(ctx context.Context, d *Destination, m *message.Message
 	meta["channel.id"] = c.ID
 	meta["destination.id"] = d.ID
 	if err := d.Adapter.Send(ctx, payload, meta); err != nil {
-		_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, payload, err.Error())
+		_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, payload, nil, err.Error())
 		c.publishDestination(m.ID, d.ID, message.StateError)
 		return err
 	}
-	_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateSent, payload, "")
+	_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateSent, payload, nil, "")
 	c.publishDestination(m.ID, d.ID, message.StateSent)
 	return nil
 }

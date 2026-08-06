@@ -29,6 +29,6 @@ func (r *MemoryRecorder) SetTransformed(ctx context.Context, id int64, payload [
 	return nil
 }
 
-func (r *MemoryRecorder) SetDestinationState(ctx context.Context, id int64, destID string, state message.State, payload []byte, errText string) error {
+func (r *MemoryRecorder) SetDestinationState(ctx context.Context, id int64, destID string, state message.State, payload []byte, meta map[string]string, errText string) error {
 	return nil
 }

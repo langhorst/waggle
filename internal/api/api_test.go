@@ -293,7 +293,7 @@ func TestDLQAndRequeue(t *testing.T) {
 	ctx := context.Background()
 
 	// Manufacture a dead-lettered delivery for a second destination.
-	if err := h.st.SetDestinationState(ctx, id, "flaky", message.StateQueued, []byte("payload"), ""); err != nil {
+	if err := h.st.SetDestinationState(ctx, id, "flaky", message.StateQueued, []byte("payload"), nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.st.Enqueue(ctx, "feed", "flaky", id); err != nil {

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -15,6 +16,9 @@ type QueueItem struct {
 	QueueID   int64
 	MessageID int64
 	Payload   []byte
+	// Meta is the delivery's stored metadata (script meta writes that
+	// outbound adapters read); nil when none was recorded.
+	Meta      map[string]string
 	Attempts  int
 	NotBefore time.Time
 }
@@ -36,18 +40,24 @@ func (s *Store) Enqueue(ctx context.Context, channelID, destID string, messageID
 // caller must respect NotBefore), or nil when the queue is empty.
 func (s *Store) Head(ctx context.Context, channelID, destID string) (*QueueItem, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT q.id, q.message_id, q.not_before, COALESCE(d.payload, x'') , COALESCE(d.attempts, 0)
+		SELECT q.id, q.message_id, q.not_before, COALESCE(d.payload, x'') , COALESCE(d.meta, ''), COALESCE(d.attempts, 0)
 		FROM destination_queue q
 		LEFT JOIN message_destinations d ON d.message_id = q.message_id AND d.destination_id = q.destination_id
 		WHERE q.channel_id = ? AND q.destination_id = ?
 		ORDER BY q.id LIMIT 1`, channelID, destID)
 	var item QueueItem
 	var notBefore int64
-	if err := row.Scan(&item.QueueID, &item.MessageID, &notBefore, &item.Payload, &item.Attempts); err != nil {
+	var metaJSON string
+	if err := row.Scan(&item.QueueID, &item.MessageID, &notBefore, &item.Payload, &metaJSON, &item.Attempts); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("store: queue head: %w", err)
+	}
+	if metaJSON != "" {
+		if err := json.Unmarshal([]byte(metaJSON), &item.Meta); err != nil {
+			return nil, fmt.Errorf("store: queue head: decoding meta: %w", err)
+		}
 	}
 	item.NotBefore = time.UnixMilli(notBefore)
 	return &item, nil

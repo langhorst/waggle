@@ -178,9 +178,9 @@ func (s *Store) SetTransformed(ctx context.Context, id int64, payload []byte, da
 }
 
 // SetDestinationState upserts one destination's outcome. A nil payload
-// preserves any previously stored payload. state=ERROR marks the row
-// dead-lettered (retrying deliveries stay QUEUED until they exhaust).
-func (s *Store) SetDestinationState(ctx context.Context, id int64, destID string, state message.State, payload []byte, errText string) error {
+// (or nil meta) preserves any previously stored value. state=ERROR marks the
+// row dead-lettered (retrying deliveries stay QUEUED until they exhaust).
+func (s *Store) SetDestinationState(ctx context.Context, id int64, destID string, state message.State, payload []byte, meta map[string]string, errText string) error {
 	now := nowMillis()
 	deadLetter := 0
 	if state == message.StateError {
@@ -193,18 +193,27 @@ func (s *Store) SetDestinationState(ctx context.Context, id int64, destID string
 	if state == message.StateSent {
 		sentAt = now
 	}
+	var metaJSON any
+	if meta != nil {
+		encoded, err := json.Marshal(meta)
+		if err != nil {
+			return fmt.Errorf("store: set destination state: encoding meta: %w", err)
+		}
+		metaJSON = string(encoded)
+	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO message_destinations (message_id, destination_id, state, payload, last_error, dead_letter, queued_at, sent_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO message_destinations (message_id, destination_id, state, payload, meta, last_error, dead_letter, queued_at, sent_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (message_id, destination_id) DO UPDATE SET
 			state = excluded.state,
 			payload = COALESCE(excluded.payload, message_destinations.payload),
+			meta = COALESCE(excluded.meta, message_destinations.meta),
 			last_error = excluded.last_error,
 			dead_letter = excluded.dead_letter,
 			queued_at = COALESCE(excluded.queued_at, message_destinations.queued_at),
 			sent_at = COALESCE(excluded.sent_at, message_destinations.sent_at),
 			updated_at = excluded.updated_at`,
-		id, destID, string(state), payload, errText, deadLetter, queuedAt, sentAt, now)
+		id, destID, string(state), payload, metaJSON, errText, deadLetter, queuedAt, sentAt, now)
 	if err != nil {
 		return fmt.Errorf("store: set destination state: %w", err)
 	}
