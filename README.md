@@ -56,11 +56,11 @@ replay.
 ## Concepts
 
 **Formats.** Every message parses into a generic tree shared by all
-formats; format modules (`hl7v2`, `astm`, `csv`, `json`) provide parse,
-serialize, and a path dialect. Each dialect counts the way its format's
-own ecosystem counts — HL7/ASTM/CSV are 1-based like their specs and
-Mirth, JSON is 0-based like JavaScript/JSONPath/jq (XML, when it lands,
-will be 1-based like XPath):
+formats; format modules (`hl7v2`, `astm`, `csv`, `json`, `xml`) provide
+parse, serialize, and a path dialect. Each dialect counts the way its
+format's own ecosystem counts — HL7/ASTM/CSV are 1-based like their specs
+and Mirth, JSON is 0-based like JavaScript/JSONPath/jq, XML is 1-based
+like XPath:
 
 - HL7 v2: `PID-5.1`, `PID-3[2].1`, `OBX[2]-5`, `MSH-9.1.2` (segment →
   field → repetition → component → subcomponent, escapes decoded/encoded
@@ -72,6 +72,13 @@ will be 1-based like XPath):
   HL7 repetition). Leaves are type-tagged: numbers, booleans, and null
   round-trip exactly as typed, and `msg.set` from a script keeps the JS
   value's type — `{"count":5}` never mutates into `{"count":"5"}`.
+- XML: `Patient/name[1]/family`, `Patient/@id`, `entry/resource/id/@value`
+  (an XPath-flavored subset — slash steps, 1-based predicates, `@attr`).
+  Tags keep their namespace prefixes exactly as written; xmlns
+  declarations round-trip as ordinary attributes. The canonical form is
+  compact: formatting whitespace, comments, and DOCTYPE drop at parse,
+  attribute order is preserved, and segment handles join with slashes
+  (`msg.segments('entry')[0].get('resource/id/@value')`).
 
 Adding a format means implementing `format.DataType` and registering it —
 compile-time, like adapters. Transformers are data; adapters and formats
@@ -179,6 +186,11 @@ workflow, with results flowing up and orders/queries flowing down —
   the caller's HTTP status reflects the HIS's actual ACK — and a script
   rejection of a non-Patient payload answers 400. Covered by
   `TestFHIRWebhookToHL7`.
+- `fhir-xml-webhook.yaml`: the same webhook contract accepting the Patient
+  as FHIR **XML** (`fhir-xml-patient-to-adt.js` reads the value-attribute
+  style: `Patient/name[1]/family/@value`) — two front doors, one HIS.
+  Covered by `TestFHIRXMLWebhookToHL7`, including 400 for a non-Patient
+  document and 500 for malformed XML.
 
 **Delivery.** Each queueing destination has exactly one worker draining
 its FIFO queue: transient failures back off exponentially (jittered,

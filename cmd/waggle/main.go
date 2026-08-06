@@ -39,6 +39,7 @@ import (
 	_ "github.com/langhorst/waggle/internal/format/csvfmt"
 	_ "github.com/langhorst/waggle/internal/format/hl7v2"
 	_ "github.com/langhorst/waggle/internal/format/jsonfmt"
+	_ "github.com/langhorst/waggle/internal/format/xmlfmt"
 )
 
 func main() {

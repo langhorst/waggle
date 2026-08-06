@@ -25,6 +25,7 @@ import (
 	"github.com/langhorst/waggle/internal/store"
 
 	_ "github.com/langhorst/waggle/internal/adapter/httpout"
+	_ "github.com/langhorst/waggle/internal/format/xmlfmt"
 )
 
 // apiHarness is the shared setup for the API E2E tests: a store, a script
@@ -306,5 +307,107 @@ destinations:
 	counts, err := h.st.MessageCounts(ctx, "fhir-webhook-to-hl7")
 	if err != nil || counts[message.StateSent] != 1 || counts[message.StateError] != 1 {
 		t.Errorf("counts = %v, %v", counts, err)
+	}
+}
+
+// TestFHIRXMLWebhookToHL7 drives the fhir-xml-webhook example: the same
+// webhook contract as the JSON variant, but the Patient arrives as FHIR
+// XML — value attributes, a default xmlns, XPath-flavored script paths.
+func TestFHIRXMLWebhookToHL7(t *testing.T) {
+	h := newAPIHarness(t)
+	ctx := context.Background()
+
+	var mu sync.Mutex
+	var received [][]byte
+	his, err := mllp.NewListener(map[string]any{"addr": "127.0.0.1:0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliver := func(ctx context.Context, raw []byte, meta map[string]string) (adapter.Receipt, error) {
+		mu.Lock()
+		received = append(received, append([]byte(nil), raw...))
+		mu.Unlock()
+		done := make(chan adapter.AckDecision, 1)
+		done <- adapter.AckDecision{Code: "AA"}
+		return adapter.Receipt{Done: done}, nil
+	}
+	if err := his.Start(ctx, deliver); err != nil {
+		t.Fatal(err)
+	}
+	defer his.Stop()
+
+	h.startChannel(t, "fhir-xml-webhook", `
+id: fhir-xml-webhook
+source:
+  type: http-listener
+  dataType: xml
+  settings: {listen: "127.0.0.1:0", path: /fhir/Patient, ackMode: destination}
+transformers: ["`+filepath.Join(h.scriptsDir, "fhir-xml-patient-to-adt.js")+`"]
+destinations:
+  - id: to-his
+    dataType: hl7v2
+    waitForAck: true
+    adapter:
+      type: mllp-sender
+      settings: {addr: "`+his.Addr()+`"}
+`)
+	ch, _ := h.eng.Channel("fhir-xml-webhook")
+	hookURL := "http://" + ch.Source.(*httpin.Listener).Addr() + "/fhir/Patient"
+
+	patient := `<?xml version="1.0" encoding="UTF-8"?>` +
+		`<Patient xmlns="http://hl7.org/fhir">` +
+		`<id value="pat-9"/>` +
+		`<identifier><system value="urn:waggle:mrn"/><value value="MRN9"/></identifier>` +
+		`<name><family value="Doe"/><given value="John"/></name>` +
+		`<birthDate value="1980-01-01"/>` +
+		`<gender value="male"/>` +
+		`</Patient>`
+	resp, err := http.Post(hookURL, "application/fhir+xml", bytes.NewReader([]byte(patient)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"code":"AA"`) {
+		t.Fatalf("webhook = %d %s", resp.StatusCode, body)
+	}
+
+	mu.Lock()
+	if len(received) != 1 {
+		mu.Unlock()
+		t.Fatalf("HIS received %d messages", len(received))
+	}
+	hl7 := string(received[0])
+	mu.Unlock()
+	for _, want := range []string{"ADT^A31", "FHIR-XML", "PID|1||MRN9||Doe^John||19800101|M"} {
+		if !strings.Contains(hl7, want) {
+			t.Errorf("HIS message missing %q:\n%s", want, hl7)
+		}
+	}
+
+	// A non-Patient document rejects with AR → HTTP 400; nothing delivered.
+	resp, err = http.Post(hookURL, "application/fhir+xml", bytes.NewReader([]byte(`<Observation><id value="x"/></Observation>`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "Patient resource") {
+		t.Errorf("rejection = %d %s", resp.StatusCode, body)
+	}
+	// Malformed XML fails to parse: pipeline error → HTTP 500.
+	resp, err = http.Post(hookURL, "application/fhir+xml", bytes.NewReader([]byte(`<Patient><unclosed>`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("malformed XML = %d", resp.StatusCode)
+	}
+	mu.Lock()
+	n := len(received)
+	mu.Unlock()
+	if n != 1 {
+		t.Errorf("rejected/malformed messages reached the HIS")
 	}
 }
