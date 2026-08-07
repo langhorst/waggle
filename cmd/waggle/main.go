@@ -32,10 +32,14 @@ import (
 	// Register the built-in adapters and format modules.
 	_ "github.com/langhorst/waggle/internal/adapter/astm1381"
 	_ "github.com/langhorst/waggle/internal/adapter/file"
+	_ "github.com/langhorst/waggle/internal/adapter/httpin"
+	_ "github.com/langhorst/waggle/internal/adapter/httpout"
 	_ "github.com/langhorst/waggle/internal/adapter/mllp"
 	_ "github.com/langhorst/waggle/internal/format/astm"
 	_ "github.com/langhorst/waggle/internal/format/csvfmt"
 	_ "github.com/langhorst/waggle/internal/format/hl7v2"
+	_ "github.com/langhorst/waggle/internal/format/jsonfmt"
+	_ "github.com/langhorst/waggle/internal/format/xmlfmt"
 )
 
 func main() {

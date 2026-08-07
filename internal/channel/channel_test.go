@@ -79,7 +79,7 @@ func (r *recordingRecorder) SetTransformed(ctx context.Context, id int64, payloa
 	r.log("transformed")
 	return nil
 }
-func (r *recordingRecorder) SetDestinationState(ctx context.Context, id int64, destID string, state message.State, payload []byte, errText string) error {
+func (r *recordingRecorder) SetDestinationState(ctx context.Context, id int64, destID string, state message.State, payload []byte, meta map[string]string, errText string) error {
 	r.log("dest:%s:%s", destID, state)
 	return nil
 }

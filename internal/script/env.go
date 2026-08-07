@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/dop251/goja"
@@ -19,6 +20,7 @@ type env struct {
 	rt       *goja.Runtime
 	m        *message.Message
 	msgValue goja.Value
+	metaMap  map[string]any
 
 	created   []*scriptMsg
 	rejection *channel.Rejection
@@ -45,11 +47,13 @@ func newEnv(rt *goja.Runtime, m *message.Message) (*env, error) {
 	msgObj["raw"] = string(m.Raw)
 	e.msgValue = rt.ToValue(msgObj)
 
-	meta := make(map[string]any, len(m.Meta))
+	// goja wraps Go maps by reference, so script writes land in metaMap;
+	// syncMeta folds them back into the message after a successful run.
+	e.metaMap = make(map[string]any, len(m.Meta))
 	for k, v := range m.Meta {
-		meta[k] = v
+		e.metaMap[k] = v
 	}
-	_ = rt.Set("meta", meta)
+	_ = rt.Set("meta", e.metaMap)
 	_ = rt.Set("msg", e.msgValue)
 	_ = rt.Set("logger", e.loggerObj())
 	_ = rt.Set("response", e.responseObj())
@@ -83,7 +87,7 @@ func (e *env) wrapMsg(sm *scriptMsg, handle int) map[string]any {
 			return vals, nil
 		},
 		"set": func(path string, value goja.Value) error {
-			return sm.dt.Set(sm.tree(), path, jsString(value))
+			return setValue(sm.dt, sm.tree(), path, value)
 		},
 		"segments": func(name string) []map[string]any {
 			segs := sm.dt.Segments(sm.tree(), name)
@@ -105,17 +109,21 @@ func (e *env) wrapSegment(sm *scriptMsg, seg *message.Node) map[string]any {
 	// against exactly this occurrence; the shared node pointer means sets
 	// mutate the real tree.
 	scoped := &message.Node{Name: sm.tree().Name, Children: []*message.Node{seg}}
+	join := func(segName, rel string) string { return segName + "-" + rel }
+	if j, ok := sm.dt.(format.SegmentJoiner); ok {
+		join = j.JoinSegmentPath
+	}
 	return map[string]any{
 		"name": seg.Name,
 		"get": func(rel string) (any, error) {
-			nodes, err := sm.dt.Resolve(scoped, seg.Name+"-"+rel)
+			nodes, err := sm.dt.Resolve(scoped, join(seg.Name, rel))
 			if err != nil || len(nodes) == 0 {
 				return nil, err
 			}
 			return sm.dt.Value(sm.tree(), nodes[0]), nil
 		},
 		"set": func(rel string, value goja.Value) error {
-			return sm.dt.Set(scoped, seg.Name+"-"+rel, jsString(value))
+			return setValue(sm.dt, scoped, join(seg.Name, rel), value)
 		},
 		"value": func() string {
 			return sm.dt.Value(sm.tree(), seg)
@@ -192,6 +200,53 @@ func (e *env) applyResult(v goja.Value, m *message.Message) error {
 	m.Tree = sm.tree()
 	m.DataType = sm.dt.Name()
 	return nil
+}
+
+// syncMeta folds script writes to the meta object back into the message:
+// scalars are stringified, deleted keys disappear, and anything
+// non-scalar (functions, objects) is dropped. Called only after a
+// successful run so a failed script leaves meta untouched.
+func (e *env) syncMeta() {
+	meta := make(map[string]string, len(e.metaMap))
+	for k, v := range e.metaMap {
+		switch t := v.(type) {
+		case string:
+			meta[k] = t
+		case bool:
+			meta[k] = strconv.FormatBool(t)
+		case int64:
+			meta[k] = strconv.FormatInt(t, 10)
+		case float64:
+			meta[k] = strconv.FormatFloat(t, 'g', -1, 64)
+		}
+	}
+	e.m.Meta = meta
+}
+
+// setValue writes a script-provided value at path. Formats that distinguish
+// value types (format.TypedSetter — JSON) receive the native JS type so
+// numbers and booleans stay typed on the wire; everything else gets the JS
+// string conversion.
+func setValue(dt format.DataType, root *message.Node, path string, v goja.Value) error {
+	if ts, ok := dt.(format.TypedSetter); ok {
+		return ts.SetTyped(root, path, jsScalar(v))
+	}
+	return dt.Set(root, path, jsString(v))
+}
+
+// jsScalar exports a JS value as a Go scalar for a TypedSetter:
+// null/undefined → nil, primitives keep their type, anything else falls back
+// to JS string conversion.
+func jsScalar(v goja.Value) any {
+	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
+		return nil
+	}
+	switch t := v.Export().(type) {
+	case string, bool, int64, float64:
+		return t
+	default:
+		return v.String()
+	}
 }
 
 // jsString renders a JS value for storage in the tree: null/undefined

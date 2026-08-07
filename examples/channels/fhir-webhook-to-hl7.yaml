@@ -1,0 +1,26 @@
+# API intake: a FHIR-style webhook POSTs Patient resources to Waggle and the
+# caller's HTTP response reflects the whole pipeline — ackMode destination
+# plus a waitForAck MLLP destination means 200 arrives only after the HIS
+# acknowledged the HL7 message (AA), a script rejection answers 400, and a
+# downstream failure answers 500.
+id: fhir-webhook-to-hl7
+name: FHIR webhook → HL7 ADT (MLLP)
+source:
+  type: http-listener
+  dataType: json
+  settings:
+    listen: ":8601"
+    path: /fhir/Patient
+    ackMode: destination
+    # requiredHeaders:
+    #   X-Api-Key: "<shared secret>"
+transformers:
+  - scripts/fhir-patient-to-adt.js
+destinations:
+  - id: to-his
+    dataType: hl7v2
+    waitForAck: true
+    adapter:
+      type: mllp-sender
+      settings:
+        addr: "127.0.0.1:6669"

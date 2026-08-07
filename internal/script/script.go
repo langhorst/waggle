@@ -8,12 +8,14 @@
 //
 // Script API:
 //   - msg.get(path) / msg.set(path, value) / msg.getAll(path) — the owning
-//     format's path dialect (1-based, e.g. "PID-5.1", "R[2].3")
+//     format's path dialect (e.g. "PID-5.1", "R[2].3", "name[0].given");
+//     for typed formats (JSON) set preserves JS number/boolean/null types
 //   - msg.segments(name) — handles with .get/.set relative paths and .name
 //   - msg.raw, msg.dataType, msg.id, msg.channel
 //   - newMessage(dataType) — fresh empty message for format conversion; a
 //     transformer that returns it replaces the pipeline message's tree
-//   - meta — read-only source metadata
+//   - meta — source metadata; writable, and writes flow to outbound
+//     adapters (meta['http.path'] routes the http-sender per message)
 //   - logger.info/warn/error(...)
 //   - response.reject(code, text) — stop processing, Invalid Message
 //     Channel, ACK exactly code/text in destination-ACK mode
@@ -310,5 +312,6 @@ func (s *Script) run(m *message.Message, timeout time.Duration) (goja.Value, err
 	if err := env.applyResult(v, m); err != nil {
 		return nil, fmt.Errorf("script %s: %w", s.path, err)
 	}
+	env.syncMeta()
 	return v, nil
 }

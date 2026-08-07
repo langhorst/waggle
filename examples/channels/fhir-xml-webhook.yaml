@@ -1,0 +1,24 @@
+# API intake, XML edition: the same webhook contract as
+# fhir-webhook-to-hl7.yaml but accepting the Patient as FHIR XML — two
+# front doors, one HIS. ackMode destination + waitForAck means the
+# caller's HTTP status is the HIS's actual ACK; a non-Patient document
+# answers 400.
+id: fhir-xml-webhook
+name: FHIR XML webhook → HL7 ADT (MLLP)
+source:
+  type: http-listener
+  dataType: xml
+  settings:
+    listen: ":8602"
+    path: /fhir/Patient
+    ackMode: destination
+transformers:
+  - scripts/fhir-xml-patient-to-adt.js
+destinations:
+  - id: to-his
+    dataType: hl7v2
+    waitForAck: true
+    adapter:
+      type: mllp-sender
+      settings:
+        addr: "127.0.0.1:6669"

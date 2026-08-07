@@ -16,6 +16,13 @@ type Node struct {
 	Name     string  `json:"name"`
 	Value    string  `json:"value,omitempty"`
 	Children []*Node `json:"children,omitempty"`
+
+	// Kind refines the node for formats whose wire model is richer than
+	// positional text. Delimited formats leave it empty. jsonfmt uses the
+	// leaf kinds "string", "number", "bool", "null" and the container kinds
+	// "object", "array" so values round-trip typed and {"a":[1]} stays
+	// distinct from {"a":1}.
+	Kind string `json:"kind,omitempty"`
 }
 
 // IsLeaf reports whether the node carries a value directly.
@@ -26,7 +33,7 @@ func (n *Node) Clone() *Node {
 	if n == nil {
 		return nil
 	}
-	c := &Node{Name: n.Name, Value: n.Value}
+	c := &Node{Name: n.Name, Value: n.Value, Kind: n.Kind}
 	if len(n.Children) > 0 {
 		c.Children = make([]*Node, len(n.Children))
 		for i, ch := range n.Children {

@@ -50,11 +50,11 @@ func TestRecordAndGet(t *testing.T) {
 	if err := s.SetState(ctx, m.ID, message.StateTransformed, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetDestinationState(ctx, m.ID, "d1", message.StateQueued, []byte("payload"), ""); err != nil {
+	if err := s.SetDestinationState(ctx, m.ID, "d1", message.StateQueued, []byte("payload"), nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	// Later state change without payload must preserve the stored payload.
-	if err := s.SetDestinationState(ctx, m.ID, "d1", message.StateSent, nil, ""); err != nil {
+	if err := s.SetDestinationState(ctx, m.ID, "d1", message.StateSent, nil, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -127,7 +127,7 @@ func TestRetention(t *testing.T) {
 		ids = append(ids, record(t, s, "c1", "m").ID)
 	}
 	// Reference one old message from the queue: it must survive pruning.
-	if err := s.SetDestinationState(ctx, ids[0], "d1", message.StateQueued, []byte("p"), ""); err != nil {
+	if err := s.SetDestinationState(ctx, ids[0], "d1", message.StateQueued, []byte("p"), nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Enqueue(ctx, "c1", "d1", ids[0]); err != nil {
@@ -170,7 +170,7 @@ func TestQueueLifecycle(t *testing.T) {
 	m1 := record(t, s, "c1", "first")
 	m2 := record(t, s, "c1", "second")
 	for _, m := range []*message.Message{m1, m2} {
-		if err := s.SetDestinationState(ctx, m.ID, "d1", message.StateQueued, m.Raw, ""); err != nil {
+		if err := s.SetDestinationState(ctx, m.ID, "d1", message.StateQueued, m.Raw, nil, ""); err != nil {
 			t.Fatal(err)
 		}
 		if err := s.Enqueue(ctx, "c1", "d1", m.ID); err != nil {
@@ -244,7 +244,7 @@ func TestQueueSurvivesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := record(t, s, "c1", "durable")
-	if err := s.SetDestinationState(ctx, m.ID, "d1", message.StateQueued, []byte("payload"), ""); err != nil {
+	if err := s.SetDestinationState(ctx, m.ID, "d1", message.StateQueued, []byte("payload"), nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Enqueue(ctx, "c1", "d1", m.ID); err != nil {

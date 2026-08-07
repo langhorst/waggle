@@ -69,7 +69,7 @@ func enqueue(t *testing.T, s *store.Store, channelID, destID, payload string) in
 	if err := s.Record(ctx, m); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetDestinationState(ctx, m.ID, destID, message.StateQueued, []byte(payload), ""); err != nil {
+	if err := s.SetDestinationState(ctx, m.ID, destID, message.StateQueued, []byte(payload), nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Enqueue(ctx, channelID, destID, m.ID); err != nil {
@@ -231,5 +231,64 @@ func TestBackoffSchedule(t *testing.T) {
 	}
 	if fmt.Sprint(w.backoffDelay(50)) == "" { // must not overflow
 		t.Fatal("unreachable")
+	}
+}
+
+// metaAdapter records the meta map each Send received.
+type metaAdapter struct {
+	mu    sync.Mutex
+	metas []map[string]string
+}
+
+func (a *metaAdapter) Open(ctx context.Context) error { return nil }
+func (a *metaAdapter) Close() error                   { return nil }
+func (a *metaAdapter) Send(ctx context.Context, payload []byte, meta map[string]string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	copied := make(map[string]string, len(meta))
+	for k, v := range meta {
+		copied[k] = v
+	}
+	a.metas = append(a.metas, copied)
+	return nil
+}
+
+func TestWorkerPassesStoredMeta(t *testing.T) {
+	s := setup(t)
+	ctx := context.Background()
+	m := &message.Message{
+		ChannelID: "c1", CorrelationID: "x", Raw: []byte("x"),
+		DataType: "json", State: message.StateReceived, ReceivedAt: time.Now(),
+	}
+	if err := s.Record(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	meta := map[string]string{"http.path": "/patients/9", "http.method": "PUT"}
+	if err := s.SetDestinationState(ctx, m.ID, "api", message.StateQueued, []byte("{}"), meta, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Enqueue(ctx, "c1", "api", m.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &metaAdapter{}
+	w := &Worker{Store: s, Adapter: a, ChannelID: "c1", DestID: "api", Log: slog.Default()}
+	runWorker(t, w)
+	waitFor(t, "delivery", func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return len(a.metas) == 1
+	})
+
+	a.mu.Lock()
+	got := a.metas[0]
+	a.mu.Unlock()
+	for k, v := range meta {
+		if got[k] != v {
+			t.Errorf("meta[%s] = %q, want %q", k, got[k], v)
+		}
+	}
+	if got["destination.id"] != "api" || got["channel.id"] != "c1" {
+		t.Errorf("worker identity keys missing: %v", got)
 	}
 }

@@ -11,9 +11,9 @@ of outbound Channel Adapters with **Guaranteed Delivery**.
 
 ```
                         ┌────────────────────── channel ──────────────────────┐
-  MLLP / files  ──────► │ inbound adapter → filter → translator chain ─┬─► queue → MLLP sender
-                        │        │                                     ├─► queue → file writer
-                        │     SQLite (messages, queues, replay)        └─► …
+  MLLP / HTTP / ──────► │ inbound adapter → filter → translator chain ─┬─► queue → MLLP sender
+  files                 │        │                                     ├─► queue → HTTP sender
+                        │     SQLite (messages, queues, replay)        └─► queue → file writer
                         └─────────────────────────────────────────────────────┘
                                   ▲                        ▲
                           TUI (embedded)          web UI + REST/SSE API
@@ -22,15 +22,13 @@ of outbound Channel Adapters with **Guaranteed Delivery**.
 ## Quick start
 
 ```sh
-go build ./cmd/waggle
-
-cd examples
-../waggle daemon            # web UI on http://localhost:8420
-# or attach the read-only observer TUI (engine runs in-process):
-../waggle tui
+make run    # build + run the daemon on the examples/ config — web UI on http://localhost:8420
+make tui    # or attach the read-only observer TUI (engine runs in-process)
 ```
 
-Module path: `github.com/langhorst/waggle`.
+(Or without make: `go build -o bin/waggle ./cmd/waggle`, then run
+`../bin/waggle daemon` from `examples/`.) Module path:
+`github.com/langhorst/waggle`.
 
 Drop an HL7 file into a file-reader channel's directory, or fire messages
 at an MLLP listener, and watch them flow in the UI: live message list,
@@ -43,13 +41,13 @@ replay.
 |----------------------------|-------------------------------------------------------------------|
 | Message                    | `internal/message.Message` — raw bytes + canonical tree + states  |
 | Message Channel            | Go channels + the per-destination SQLite queue                    |
-| Channel Adapter (inbound)  | `mllp-listener`, `astm-listener`, `file-reader`                   |
+| Channel Adapter (inbound)  | `mllp-listener`, `astm-listener`, `http-listener`, `file-reader` |
 | Polling Consumer           | the `file-reader` source                                          |
 | Pipes and Filters          | the channel pipeline (`internal/channel`)                         |
 | Message Filter             | `filter:` script — distinct step, drops retain the message        |
 | Message Translator         | `transformers:` script chain (goja JavaScript)                    |
 | Recipient List             | `destinations:` — each with its own filter/translator chain       |
-| Channel Adapter (outbound) | `mllp-sender`, `astm-sender`, `file-writer`                       |
+| Channel Adapter (outbound) | `mllp-sender`, `astm-sender`, `http-sender`, `file-writer`       |
 | Guaranteed Delivery        | SQLite-backed per-destination queues with retry/backoff           |
 | Dead Letter Channel        | exhausted retries & application NAKs (`dead_letter`, requeueable) |
 | Invalid Message Channel    | parse/script failures (state `ERROR`, replayable)                 |
@@ -58,14 +56,29 @@ replay.
 ## Concepts
 
 **Formats.** Every message parses into a generic tree shared by all
-formats; format modules (`hl7v2`, `astm`, `csv`) provide parse, serialize,
-and a 1-based path dialect:
+formats; format modules (`hl7v2`, `astm`, `csv`, `json`, `xml`) provide
+parse, serialize, and a path dialect. Each dialect counts the way its
+format's own ecosystem counts — HL7/ASTM/CSV are 1-based like their specs
+and Mirth, JSON is 0-based like JavaScript/JSONPath/jq, XML is 1-based
+like XPath:
 
 - HL7 v2: `PID-5.1`, `PID-3[2].1`, `OBX[2]-5`, `MSH-9.1.2` (segment →
   field → repetition → component → subcomponent, escapes decoded/encoded
   at the parse boundary, delimiters honored from MSH-1/MSH-2)
 - ASTM E1394: `H-5`, `R[2]-3.1` (delimiters from the H record)
-- CSV: `R.1`, `R[2].3` (rows and columns)
+- CSV: `R.1`, `R[2].3` (rows and columns; 1-based like a spreadsheet)
+- JSON: `patient.name[0].given`, `entry[1].resource.id`, `["odd.key"]`
+  (0-based arrays; a key on an array fans out across its elements like an
+  HL7 repetition). Leaves are type-tagged: numbers, booleans, and null
+  round-trip exactly as typed, and `msg.set` from a script keeps the JS
+  value's type — `{"count":5}` never mutates into `{"count":"5"}`.
+- XML: `Patient/name[1]/family`, `Patient/@id`, `entry/resource/id/@value`
+  (an XPath-flavored subset — slash steps, 1-based predicates, `@attr`).
+  Tags keep their namespace prefixes exactly as written; xmlns
+  declarations round-trip as ordinary attributes. The canonical form is
+  compact: formatting whitespace, comments, and DOCTYPE drop at parse,
+  attribute order is preserved, and segment handles join with slashes
+  (`msg.segments('entry')[0].get('resource/id/@value')`).
 
 Adding a format means implementing `format.DataType` and registering it —
 compile-time, like adapters. Transformers are data; adapters and formats
@@ -95,7 +108,9 @@ function transform(msg) {
 Script API: `msg.get/set/getAll/segments`, `msg.raw`, `msg.dataType`,
 `newMessage(dataType)`, `meta`, `logger.info/warn/error`, and
 `response.reject(code, text)` / `response.setAck(code, text)` for
-validation-driven ACKs. Hot reload is on by default: edit a script and the
+validation-driven ACKs. `meta` is writable: entries a transformer sets
+travel with the delivery (persisted alongside the queued payload), which
+is how scripts route the `http-sender` per message. Hot reload is on by default: edit a script and the
 next message uses it; a broken save keeps the previous version running.
 
 **ACK modes (MLLP).** `ackMode: immediate` acknowledges as soon as the
@@ -116,6 +131,21 @@ answers EOT — the E1381 receiver interrupt — since the protocol has no
 application-status channel. Sender-side failures (busy NAK, retry
 exhaustion, interrupts, timeouts) are all transient: the delivery queue
 retries with backoff and dead-letters after `maxAttempts`.
+
+**HTTP adapters.** `http-listener` turns Waggle into an API: each listener
+owns its address, path, and optional TLS (`certFile`/`keyFile`), guarded by
+basic auth and/or shared-secret headers. The HTTP response is the transport
+ACK with the same two modes as MLLP — `ackMode: immediate` answers 202 once
+the message is durably recorded; `ackMode: destination` holds the response
+for the pipeline outcome (AA→200, AR→400, AE→500, hold timeout→504), so a
+`response.reject` in a script or a failed `waitForAck` delivery surfaces to
+the caller. `http-sender` makes Waggle an API client: YAML sets the url,
+method, content type, static headers (Authorization etc.), basic auth, and
+an optional private CA; scripts override per message with
+`meta['http.path']` and `meta['http.method']`. Failure classification
+drives Guaranteed Delivery — network errors, 408, 429, and 5xx retry with
+backoff; any other non-2xx is an application rejection that dead-letters
+immediately with the API's response body in the error text.
 
 **Lab bridge examples** (`examples/channels/`): the full bidirectional lab
 workflow, with results flowing up and orders/queries flowing down —
@@ -143,6 +173,24 @@ workflow, with results flowing up and orders/queries flowing down —
   body for a real order lookup). Covered by `TestQueryResponseRoundTrip`,
   including the assertion that non-query traffic is FILTERED and produces
   no response.
+
+**API examples** (`examples/channels/`): the same engine speaking REST —
+
+- `adt-to-fhir.yaml`: HL7 ADT over MLLP → FHIR R4-shaped Patient resource
+  POSTed to an API (`adt-to-fhir-patient.js`); A28/A31 updates PUT to
+  `/fhir/Patient/{id}` via the script's meta routing. Covered by
+  `TestADTToFHIREndToEnd`, including a 404 dead-lettering with the API's
+  response body.
+- `fhir-webhook-to-hl7.yaml`: a webhook POST becomes HL7 ADT^A31 over MLLP
+  (`fhir-patient-to-adt.js`), with `ackMode: destination` + `waitForAck` so
+  the caller's HTTP status reflects the HIS's actual ACK — and a script
+  rejection of a non-Patient payload answers 400. Covered by
+  `TestFHIRWebhookToHL7`.
+- `fhir-xml-webhook.yaml`: the same webhook contract accepting the Patient
+  as FHIR **XML** (`fhir-xml-patient-to-adt.js` reads the value-attribute
+  style: `Patient/name[1]/family/@value`) — two front doors, one HIS.
+  Covered by `TestFHIRXMLWebhookToHL7`, including 400 for a non-Patient
+  document and 500 for malformed XML.
 
 **Delivery.** Each queueing destination has exactly one worker draining
 its FIFO queue: transient failures back off exponentially (jittered,
@@ -184,12 +232,15 @@ messages forever; queue-referenced messages are never pruned.
 ## Development
 
 ```sh
-go test ./...            # unit, functional, and E2E tests (no network needed)
-go test -race ./...
-go vet ./...
-go test ./internal/format/... -fuzz=FuzzParse -fuzztime=30s   # parser fuzzing
-go test ./internal/format/hl7v2 ./internal/channel -bench=. -run=NONE
+make check    # the pre-push gate: gofmt check + go vet + race-enabled tests
+make test     # plain test run (unit, functional, E2E — no network needed)
+make cover    # race tests with a coverage summary
+make fuzz     # 30s of parser fuzzing per format (FUZZTIME=2m make fuzz for longer)
+make bench    # parser + pipeline benchmarks
 ```
+
+`make help` lists everything; the plain `go test ./...` / `go vet ./...`
+commands behind these targets work as ever.
 
 Package map: `internal/message` (tree, states, diff) · `internal/format/*`
 (data types) · `internal/adapter/*` (Channel Adapters + registry) ·
