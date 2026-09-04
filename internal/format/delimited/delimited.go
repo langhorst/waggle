@@ -95,25 +95,39 @@ func FieldNode(idx int, raw string, dl Delims, decode func(string) string) *mess
 	field := &message.Node{Name: strconv.Itoa(idx), Kind: KindField}
 	for r, repRaw := range strings.Split(raw, ByteString(dl.Rep)) {
 		rep := &message.Node{Name: strconv.Itoa(r + 1), Kind: KindRepetition}
-		if strings.IndexByte(repRaw, dl.Comp) < 0 && (!dl.HasSub || strings.IndexByte(repRaw, dl.Sub) < 0) {
-			rep.Value = decode(repRaw)
-		} else {
-			for c, compRaw := range strings.Split(repRaw, ByteString(dl.Comp)) {
-				comp := &message.Node{Name: strconv.Itoa(c + 1), Kind: KindComponent}
-				if !dl.HasSub || strings.IndexByte(compRaw, dl.Sub) < 0 {
-					comp.Value = decode(compRaw)
-				} else {
-					for s, subRaw := range strings.Split(compRaw, ByteString(dl.Sub)) {
-						comp.Children = append(comp.Children,
-							&message.Node{Name: strconv.Itoa(s + 1), Kind: KindSubcomponent, Value: decode(subRaw)})
-					}
-				}
-				rep.Children = append(rep.Children, comp)
-			}
-		}
+		fillRepetition(rep, repRaw, dl, decode)
 		field.Children = append(field.Children, rep)
 	}
 	return field
+}
+
+// fillRepetition parses one repetition's text into rep: components split by
+// dl.Comp, subcomponents by dl.Sub, decode applied to every leaf.
+func fillRepetition(rep *message.Node, repRaw string, dl Delims, decode func(string) string) {
+	rep.Value, rep.Children = "", nil
+	if strings.IndexByte(repRaw, dl.Comp) < 0 && (!dl.HasSub || strings.IndexByte(repRaw, dl.Sub) < 0) {
+		rep.Value = decode(repRaw)
+		return
+	}
+	for c, compRaw := range strings.Split(repRaw, ByteString(dl.Comp)) {
+		comp := &message.Node{Name: strconv.Itoa(c + 1), Kind: KindComponent}
+		fillComponent(comp, compRaw, dl, decode)
+		rep.Children = append(rep.Children, comp)
+	}
+}
+
+// fillComponent parses one component's text into comp, splitting
+// subcomponents when the format has them.
+func fillComponent(comp *message.Node, compRaw string, dl Delims, decode func(string) string) {
+	comp.Value, comp.Children = "", nil
+	if !dl.HasSub || strings.IndexByte(compRaw, dl.Sub) < 0 {
+		comp.Value = decode(compRaw)
+		return
+	}
+	for s, subRaw := range strings.Split(compRaw, ByteString(dl.Sub)) {
+		comp.Children = append(comp.Children,
+			&message.Node{Name: strconv.Itoa(s + 1), Kind: KindSubcomponent, Value: decode(subRaw)})
+	}
 }
 
 // RawFieldNode builds a single-repetition leaf field whose value bypasses
@@ -302,7 +316,14 @@ func childOrPromoted(n *message.Node, idx int) *message.Node {
 // end), fields and repetitions are padded with empties, and leaves are
 // promoted when the path addresses below them (the old leaf value becomes
 // child 1). The path must address at least a field.
-func Set(root *message.Node, p Path, value string) error {
+//
+// With dl set, value is split on the separators below the addressed level,
+// the way the parser splits wire text: set('PID-5', 'DOE^JOHN') yields two
+// components, and set('PID-5', get('PID-5')) round-trips. This is what
+// Mirth users expect. Separators at or above the addressed level are never
+// split (a repetition separator inside a component value stays literal and
+// is escaped on the wire). With dl nil the value is stored as one leaf.
+func Set(root *message.Node, p Path, value string, dl *Delims) error {
 	if p.Field == 0 {
 		return fmt.Errorf("path %s: set requires a field or deeper", p.Seg)
 	}
@@ -326,15 +347,26 @@ func Set(root *message.Node, p Path, value string) error {
 	}
 	rep := field.Children[fieldRep-1]
 
-	target := rep
-	if p.Comp != 0 {
-		target = ensureChild(target, p.Comp, KindComponent)
-		if p.Sub != 0 {
-			target = ensureChild(target, p.Sub, KindSubcomponent)
+	identity := func(s string) string { return s }
+	switch {
+	case p.Comp == 0:
+		if dl != nil {
+			fillRepetition(rep, value, *dl, identity)
+			return nil
 		}
+		rep.Value, rep.Children = value, nil
+	case p.Sub == 0:
+		comp := ensureChild(rep, p.Comp, KindComponent)
+		if dl != nil {
+			fillComponent(comp, value, *dl, identity)
+			return nil
+		}
+		comp.Value, comp.Children = value, nil
+	default:
+		comp := ensureChild(rep, p.Comp, KindComponent)
+		sub := ensureChild(comp, p.Sub, KindSubcomponent)
+		sub.Value, sub.Children = value, nil
 	}
-	target.Value = value
-	target.Children = nil
 	return nil
 }
 

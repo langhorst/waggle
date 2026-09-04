@@ -105,6 +105,15 @@ function transform(msg) {
 }
 ```
 
+For the delimited formats, `msg.set` splits its value on the separators
+below the addressed level, the way the parser splits wire text:
+`msg.set('PID-5', 'DOE^JOHN')` produces two components and
+`msg.set('PID-5', msg.get('PID-5'))` round-trips. Separators at or above
+that level stay literal and are escaped on the wire. For JSON, a key step
+on a non-empty array writes element 0 (what `get` reads), and an index
+step on a non-empty object is an error; populated containers are never
+replaced silently.
+
 Script API: `msg.get/set/getAll/segments`, `msg.raw`, `msg.dataType`,
 `newMessage(dataType)`, `meta`, `logger.info/warn/error`, and
 `response.reject(code, text)` / `response.setAck(code, text)` for

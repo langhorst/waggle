@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/langhorst/waggle/internal/format"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 var dt = DataType{}
@@ -244,6 +245,73 @@ func TestSetTypedAndAutovivify(t *testing.T) {
 	out, _ = dt.Serialize(root)
 	if !bytes.Contains(out, []byte(`"active":"yes"`)) || !bytes.Contains(out, []byte(`"resourceType":{"sub":"x"}`)) {
 		t.Errorf("after overwrite: %s", out)
+	}
+}
+
+// TestSetNeverReplacesPopulatedContainers: a key step on a non-empty array
+// descends into element 0 (what get reads first); an index step on a
+// non-empty object is an error. Both used to wipe the container.
+func TestSetNeverReplacesPopulatedContainers(t *testing.T) {
+	root, err := dt.Parse([]byte(`{"name":[{"family":"Doe"},{"family":"Smith"}],"id":{"a":1}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dt.Set(root, "name.family", "Roe"); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := dt.Serialize(root)
+	if want := `{"name":[{"family":"Roe"},{"family":"Smith"}],"id":{"a":1}}`; string(out) != want {
+		t.Errorf("after set name.family: %s, want %s", out, want)
+	}
+	if err := dt.Set(root, "id[0]", "x"); err == nil {
+		t.Fatal("index step on a populated object accepted")
+	}
+	out, _ = dt.Serialize(root)
+	if !strings.Contains(string(out), `"id":{"a":1}`) {
+		t.Errorf("object destroyed by rejected Set: %s", out)
+	}
+	// Scalars and empty containers still convert.
+	if err := dt.Set(root, "id.a.deep", "y"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dt.Set(root, "empty[1]", "z"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFlattenedKeysResolve: keys needing quotes are emitted with JSON
+// escapes by Flatten and must parse back with the same grammar.
+func TestFlattenedKeysResolve(t *testing.T) {
+	root, err := dt.Parse([]byte(`{"a.\nb":1,"tab\tkey":{"c]":true},"\u0001":"ctl","plain":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pv := range dt.Flatten(root) {
+		nodes, err := dt.Resolve(root, pv.Path)
+		if err != nil {
+			t.Errorf("Resolve(%s): %v", pv.Path, err)
+			continue
+		}
+		if len(nodes) != 1 || nodes[0].Value != pv.Value {
+			t.Errorf("Resolve(%s) = %v, want value %q", pv.Path, nodes, pv.Value)
+		}
+	}
+}
+
+// TestNumberKindIsValidated: a number leaf holding anything but a number
+// literal must not serialize raw.
+func TestNumberKindIsValidated(t *testing.T) {
+	for _, bad := range []string{`{"x":1}`, `"1"`, `01`, `1.`, `.5`, `+1`, `NaN`, ``} {
+		root := &message.Node{Name: "json", Kind: KindObject, Children: []*message.Node{{Name: "n", Kind: KindNumber, Value: bad}}}
+		if _, err := dt.Serialize(root); err == nil {
+			t.Errorf("number %q serialized", bad)
+		}
+	}
+	for _, ok := range []string{`0`, `-1`, `1.5`, `1e10`, `-2.5E-3`} {
+		root := &message.Node{Name: "json", Kind: KindObject, Children: []*message.Node{{Name: "n", Kind: KindNumber, Value: ok}}}
+		if _, err := dt.Serialize(root); err != nil {
+			t.Errorf("number %q rejected: %v", ok, err)
+		}
 	}
 }
 

@@ -276,7 +276,16 @@ func (DataType) Set(root *message.Node, path, value string) error {
 	if err != nil {
 		return err
 	}
-	return delimited.Set(root, p, value)
+	if p.Field <= headerRawFields(p.Seg) {
+		// H-1/H-2 hold the delimiters themselves; they are single raw values with no
+		// substructure, and writing below them would corrupt the header.
+		if p.Comp != 0 || p.Sub != 0 {
+			return fmt.Errorf("path %s: %s-%d has no components", path, p.Seg, p.Field)
+		}
+		return delimited.Set(root, p, value, nil)
+	}
+	dl := treeDelims(root)
+	return delimited.Set(root, p, value, &dl)
 }
 
 func (DataType) Segments(root *message.Node, name string) []*message.Node {

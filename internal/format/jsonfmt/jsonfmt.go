@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -166,7 +167,7 @@ func encodeValue(buf *bytes.Buffer, n *message.Node) error {
 		}
 		buf.WriteByte(']')
 	case KindNumber:
-		if !json.Valid([]byte(n.Value)) || n.Value == "" {
+		if !numberLiteral.MatchString(n.Value) {
 			return fmt.Errorf("invalid number literal %q", n.Value)
 		}
 		buf.WriteString(n.Value)
@@ -182,6 +183,9 @@ func encodeValue(buf *bytes.Buffer, n *message.Node) error {
 	}
 	return nil
 }
+
+// numberLiteral is the JSON number grammar (RFC 8259 section 6).
+var numberLiteral = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
 
 // effectiveKind returns n.Kind, inferring one for untagged nodes.
 func effectiveKind(n *message.Node) string {
@@ -267,7 +271,11 @@ func (d DataType) Set(root *message.Node, pathExpr, value string) error {
 // SetTyped implements format.TypedSetter: values set from scripts keep their
 // dynamic type (JS numbers stay JSON numbers). Intermediate structure is
 // autovivified — objects for key segments, arrays (null-padded) for index
-// segments; a scalar in the way is converted to the needed container.
+// segments; a scalar or empty container in the way is converted to the
+// needed container. A populated container is never silently replaced: a key
+// step on a non-empty array descends into element 0 (get on the same path
+// reads element 0 first), and an index step on a non-empty object is an
+// error.
 func (DataType) SetTyped(root *message.Node, pathExpr string, value any) error {
 	segs, err := parsePath(pathExpr)
 	if err != nil {
@@ -279,6 +287,9 @@ func (DataType) SetTyped(root *message.Node, pathExpr string, value any) error {
 	cur := root
 	for _, s := range segs {
 		if s.isIndex {
+			if cur.Kind == KindObject && len(cur.Children) > 0 {
+				return fmt.Errorf("json: path %q: [%d] applied to an object with keys", pathExpr, s.index)
+			}
 			if cur.Kind != KindArray {
 				cur.Kind, cur.Value, cur.Children = KindArray, "", nil
 			}
@@ -288,6 +299,12 @@ func (DataType) SetTyped(root *message.Node, pathExpr string, value any) error {
 			}
 			cur = cur.Children[s.index]
 			continue
+		}
+		if cur.Kind == KindArray && len(cur.Children) > 0 {
+			cur = cur.Children[0]
+			if cur.Kind == KindArray && len(cur.Children) > 0 {
+				return fmt.Errorf("json: path %q: key %q applied to nested arrays", pathExpr, s.key)
+			}
 		}
 		if cur.Kind != KindObject {
 			cur.Kind, cur.Value, cur.Children = KindObject, "", nil

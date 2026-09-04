@@ -176,6 +176,32 @@ func TestSet(t *testing.T) {
 	}
 }
 
+// TestSetSplitsComponents: ASTM has no subcomponents, so only the component
+// separator splits, and only below a field-level path.
+func TestSetSplitsComponents(t *testing.T) {
+	root, err := dt.Parse(sampleResult())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dt.Set(root, "P-6", "DOE^JOHN"); err != nil {
+		t.Fatal(err)
+	}
+	nodes, _ := dt.Resolve(root, "P-6.2")
+	if len(nodes) != 1 || nodes[0].Value != "JOHN" {
+		t.Errorf("P-6.2 = %v", nodes)
+	}
+	if err := dt.Set(root, "P-6.1", "A^B"); err != nil {
+		t.Fatal(err)
+	}
+	nodes, _ = dt.Resolve(root, "P-6.1")
+	if len(nodes) != 1 || nodes[0].Value != "A^B" {
+		t.Errorf("P-6.1 = %v, want the literal", nodes)
+	}
+	if err := dt.Set(root, "H-2.1", "x"); err == nil {
+		t.Error("Set below the header delimiter field accepted")
+	}
+}
+
 func TestSubcomponentPathRejected(t *testing.T) {
 	root := mustParse(t, sampleResult())
 	if _, err := dt.Resolve(root, "R-3.1.2"); err == nil {
