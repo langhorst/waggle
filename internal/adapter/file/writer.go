@@ -2,7 +2,9 @@ package file
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,31 +58,37 @@ func (w *Writer) Send(ctx context.Context, payload []byte, meta map[string]strin
 	name = strings.ReplaceAll(name, "{channel}", meta[metakey.ChannelID])
 	name = strings.ReplaceAll(name, "{dest}", meta[metakey.DestinationID])
 
-	target := filepath.Join(w.cfg.Dir, name)
-	for i := 1; ; i++ {
-		if _, err := os.Stat(target); os.IsNotExist(err) {
-			break
-		}
-		target = filepath.Join(w.cfg.Dir, fmt.Sprintf("%s.%d", name, i))
-	}
-
+	// Write to a temp file, fsync, then publish under the final name. The
+	// publish step is os.Link rather than os.Rename: link fails with EEXIST
+	// instead of silently replacing a file another channel wrote between
+	// our existence check and our rename, so collisions get a suffix
+	// without a race.
 	tmp, err := os.CreateTemp(w.cfg.Dir, ".partial-*")
 	if err != nil {
 		return fmt.Errorf("file-writer: %w", err)
 	}
 	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
 	if _, err := tmp.Write(payload); err != nil {
 		tmp.Close()
-		os.Remove(tmpName)
+		return fmt.Errorf("file-writer: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
 		return fmt.Errorf("file-writer: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
 		return fmt.Errorf("file-writer: %w", err)
 	}
-	if err := os.Rename(tmpName, target); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("file-writer: %w", err)
+	target := filepath.Join(w.cfg.Dir, name)
+	for i := 1; ; i++ {
+		err := os.Link(tmpName, target)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("file-writer: %w", err)
+		}
+		target = filepath.Join(w.cfg.Dir, fmt.Sprintf("%s.%d", name, i))
 	}
-	return nil
 }

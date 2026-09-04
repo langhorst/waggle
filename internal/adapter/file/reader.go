@@ -4,7 +4,10 @@ package file
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,9 +27,22 @@ func init() {
 	})
 }
 
+// AckMode selects what "consumed" means for a file.
+const (
+	// AckImmediate moves the file to ProcessedDir as soon as the engine has
+	// recorded it (the Guaranteed Delivery handoff).
+	AckImmediate = "immediate"
+	// AckDestination waits for the pipeline outcome: an accepting decision
+	// moves the file to ProcessedDir, a rejection (script reject, failed
+	// waitForAck delivery) to ErrorDir.
+	AckDestination = "destination"
+)
+
 // ReaderConfig configures the Polling Consumer. Each matching file is
-// delivered as one message; on acceptance it moves to ProcessedDir, on
-// rejection to ErrorDir, so a file is never delivered twice.
+// delivered as one message and then moved out of Dir, so a file is never
+// delivered twice. When the engine refuses a file (channel paused, store
+// unavailable) it stays where it is and is offered again on the next poll:
+// refusal is transient by contract, not a verdict on the file.
 type ReaderConfig struct {
 	Dir      string           `yaml:"dir"`
 	Pattern  string           `yaml:"pattern"`  // glob against the base name; default "*"
@@ -36,15 +52,26 @@ type ReaderConfig struct {
 	MinAge       adapter.Duration `yaml:"minAge"`
 	ProcessedDir string           `yaml:"processedDir"` // default <dir>/processed
 	ErrorDir     string           `yaml:"errorDir"`     // default <dir>/error
+	// AckMode is immediate (default) or destination; see the constants.
+	AckMode string `yaml:"ackMode"`
+	// HoldTimeout bounds the wait for a pipeline outcome in destination
+	// mode; on expiry the file is treated as accepted (the engine owns it).
+	// Default 30s.
+	HoldTimeout adapter.Duration `yaml:"holdTimeout"`
 }
 
 // Reader is the Polling Consumer inbound adapter.
 type Reader struct {
 	cfg ReaderConfig
+	log *slog.Logger
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
+	// stuck holds files that were delivered but could not be moved out of
+	// Dir. They must not be delivered again while this process lives; the
+	// operator sees the error in the log and moves them by hand.
+	stuck map[string]bool
 }
 
 func NewReader(settings map[string]any) (*Reader, error) {
@@ -75,7 +102,16 @@ func NewReader(settings map[string]any) (*Reader, error) {
 	if cfg.ErrorDir == "" {
 		cfg.ErrorDir = filepath.Join(cfg.Dir, "error")
 	}
-	return &Reader{cfg: cfg}, nil
+	if cfg.AckMode == "" {
+		cfg.AckMode = AckImmediate
+	}
+	if cfg.AckMode != AckImmediate && cfg.AckMode != AckDestination {
+		return nil, fmt.Errorf("file-reader: ackMode must be %q or %q", AckImmediate, AckDestination)
+	}
+	if cfg.HoldTimeout <= 0 {
+		cfg.HoldTimeout = adapter.Duration(30 * time.Second)
+	}
+	return &Reader{cfg: cfg, log: slog.Default(), stuck: map[string]bool{}}, nil
 }
 
 func (r *Reader) Start(ctx context.Context, deliver adapter.DeliverFunc) error {
@@ -145,29 +181,105 @@ func (r *Reader) poll(ctx context.Context, deliver adapter.DeliverFunc) {
 		if ctx.Err() != nil {
 			return
 		}
+		if r.stuck[name] {
+			continue
+		}
 		path := filepath.Join(r.cfg.Dir, name)
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
 		meta := map[string]string{metakey.SourceFile: name}
-		if _, err := deliver(ctx, raw, meta); err != nil {
-			moveTo(path, r.cfg.ErrorDir, name)
-			continue
+		rec, err := deliver(ctx, raw, meta)
+		if err != nil {
+			// Not accepted: the file stays put and is offered again next
+			// poll. Whatever refused this one refuses the rest too, so
+			// stop here rather than log once per file.
+			r.log.Warn("file-reader: delivery refused; leaving file in place", "file", name, "error", err)
+			return
 		}
-		moveTo(path, r.cfg.ProcessedDir, name)
+		r.settle(ctx, path, name, rec)
 	}
 }
 
+// settle moves a delivered file out of Dir according to the ack mode.
+func (r *Reader) settle(ctx context.Context, path, name string, rec adapter.Receipt) {
+	dest := r.cfg.ProcessedDir
+	if r.cfg.AckMode == AckDestination {
+		timer := time.NewTimer(time.Duration(r.cfg.HoldTimeout))
+		defer timer.Stop()
+		select {
+		case d := <-rec.Done:
+			if !accepting(d.Code) {
+				r.log.Warn("file-reader: pipeline rejected file", "file", name, "message", rec.MessageID, "code", d.Code, "text", d.Text)
+				dest = r.cfg.ErrorDir
+			}
+		case <-timer.C:
+			r.log.Warn("file-reader: no pipeline outcome within holdTimeout; treating as accepted", "file", name, "message", rec.MessageID)
+		case <-ctx.Done():
+			// Shutting down: the message is recorded, so the file is done.
+		}
+	}
+	if err := moveTo(path, dest, name); err != nil {
+		// Delivered but immovable: it would be redelivered every poll.
+		r.stuck[name] = true
+		r.log.Error("file-reader: delivered file could not be moved; it will not be re-read until restart",
+			"file", name, "message", rec.MessageID, "target", dest, "error", err)
+	}
+}
+
+// accepting reports whether an ACK code means the pipeline took the
+// message (HL7 AA, or the enhanced-mode CA).
+func accepting(code string) bool {
+	return code == "" || code == "AA" || code == "CA"
+}
+
 // moveTo relocates a consumed file, suffixing the name if the target already
-// exists so nothing is ever overwritten.
-func moveTo(path, dir, name string) {
+// exists so nothing is ever overwritten. A rename across filesystems fails
+// with EXDEV; copy-and-remove covers that case.
+func moveTo(path, dir, name string) error {
 	target := filepath.Join(dir, name)
 	for i := 1; ; i++ {
-		if _, err := os.Stat(target); os.IsNotExist(err) {
+		// Only an existing target needs a suffix; any other Stat outcome
+		// (missing, or dir is not a directory) is the rename's problem.
+		if _, err := os.Stat(target); err != nil {
 			break
 		}
 		target = filepath.Join(dir, fmt.Sprintf("%s.%d", name, i))
 	}
-	_ = os.Rename(path, target)
+	err := os.Rename(path, target)
+	if err == nil {
+		return nil
+	}
+	var linkErr *os.LinkError
+	if !errors.As(err, &linkErr) {
+		return err
+	}
+	if copyErr := copyFile(path, target); copyErr != nil {
+		return fmt.Errorf("rename: %w; copy fallback: %w", err, copyErr)
+	}
+	return os.Remove(path)
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(dst)
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		os.Remove(dst)
+		return err
+	}
+	return out.Close()
 }

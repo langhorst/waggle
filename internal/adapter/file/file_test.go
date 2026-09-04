@@ -84,26 +84,154 @@ func TestReaderDeliversAndMoves(t *testing.T) {
 	}
 }
 
-func TestReaderRejectionMovesToError(t *testing.T) {
+// TestReaderRefusalLeavesFileInPlace: a deliver error means "not accepted
+// right now" (channel paused, store busy), so the file stays where it is
+// and is offered again on the next poll. It used to be moved to the error
+// directory, turning a transient refusal into a permanent loss.
+func TestReaderRefusalLeavesFileInPlace(t *testing.T) {
 	dir := t.TempDir()
-	writeInput(t, dir, "bad.hl7", "nope")
+	writeInput(t, dir, "held.hl7", "content")
 
-	r, err := NewReader(map[string]any{"dir": dir, "interval": "50ms"})
+	r, err := NewReader(map[string]any{"dir": dir, "interval": "20ms"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	var mu sync.Mutex
+	attempts := 0
+	accept := false
 	deliver := func(ctx context.Context, raw []byte, meta map[string]string) (adapter.Receipt, error) {
-		return adapter.Receipt{}, errors.New("channel not accepting")
+		mu.Lock()
+		defer mu.Unlock()
+		attempts++
+		if !accept {
+			return adapter.Receipt{}, errors.New("channel not accepting")
+		}
+		done := make(chan adapter.AckDecision, 1)
+		done <- adapter.AckDecision{Code: "AA"}
+		return adapter.Receipt{Done: done}, nil
 	}
 	if err := r.Start(context.Background(), deliver); err != nil {
 		t.Fatal(err)
 	}
 	defer r.Stop()
 
-	waitFor(t, "file moved to error dir", func() bool {
-		entries, _ := os.ReadDir(filepath.Join(dir, "error"))
+	waitFor(t, "file to be offered more than once", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return attempts >= 3
+	})
+	if _, err := os.Stat(filepath.Join(dir, "held.hl7")); err != nil {
+		t.Fatal("refused file was moved out of the input directory")
+	}
+	if entries, _ := os.ReadDir(filepath.Join(dir, "error")); len(entries) != 0 {
+		t.Fatal("refused file landed in the error directory")
+	}
+
+	mu.Lock()
+	accept = true
+	mu.Unlock()
+	waitFor(t, "file accepted and moved", func() bool {
+		entries, _ := os.ReadDir(filepath.Join(dir, "processed"))
 		return len(entries) == 1
 	})
+}
+
+// TestReaderDestinationAck: in destination mode the pipeline outcome
+// decides between processed and error.
+func TestReaderDestinationAck(t *testing.T) {
+	dir := t.TempDir()
+	writeInput(t, dir, "good.hl7", "ok")
+	writeInput(t, dir, "rejected.hl7", "reject me")
+
+	r, err := NewReader(map[string]any{"dir": dir, "interval": "20ms", "ackMode": "destination"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliver := func(ctx context.Context, raw []byte, meta map[string]string) (adapter.Receipt, error) {
+		done := make(chan adapter.AckDecision, 1)
+		if string(raw) == "reject me" {
+			done <- adapter.AckDecision{Code: "AR", Text: "script rejected"}
+		} else {
+			done <- adapter.AckDecision{Code: "AA"}
+		}
+		return adapter.Receipt{MessageID: 1, Done: done}, nil
+	}
+	if err := r.Start(context.Background(), deliver); err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+
+	waitFor(t, "files settled", func() bool {
+		p, _ := os.ReadDir(filepath.Join(dir, "processed"))
+		e, _ := os.ReadDir(filepath.Join(dir, "error"))
+		return len(p) == 1 && len(e) == 1
+	})
+	if _, err := os.Stat(filepath.Join(dir, "processed", "good.hl7")); err != nil {
+		t.Error("accepted file not in processed/")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "error", "rejected.hl7")); err != nil {
+		t.Error("rejected file not in error/")
+	}
+}
+
+// TestReaderImmovableFileIsNotRedelivered: when a delivered file cannot be
+// moved out of the input directory it must not be read again every poll.
+func TestReaderImmovableFileIsNotRedelivered(t *testing.T) {
+	dir := t.TempDir()
+	processed := filepath.Join(dir, "processed")
+	writeInput(t, dir, "one.hl7", "content")
+
+	r, err := NewReader(map[string]any{"dir": dir, "interval": "20ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	deliveries := 0
+	deliver := func(ctx context.Context, raw []byte, meta map[string]string) (adapter.Receipt, error) {
+		mu.Lock()
+		deliveries++
+		mu.Unlock()
+		done := make(chan adapter.AckDecision, 1)
+		done <- adapter.AckDecision{Code: "AA"}
+		return adapter.Receipt{Done: done}, nil
+	}
+	// Start creates the directories; then turn processed/ into a plain
+	// file so every move into it fails.
+	if err := r.Start(context.Background(), func(context.Context, []byte, map[string]string) (adapter.Receipt, error) {
+		return adapter.Receipt{}, errors.New("not yet")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(processed); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(processed, []byte("in the way"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Start again would recreate the directory via MkdirAll, which fails
+	// on a file; drive poll directly instead.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for i := 0; i < 5; i++ {
+		r.poll(ctx, deliver)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if deliveries != 1 {
+		t.Fatalf("immovable file delivered %d times, want exactly once", deliveries)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "one.hl7")); err != nil {
+		t.Error("file should still be in the input directory")
+	}
+}
+
+func TestReaderConfigValidation(t *testing.T) {
+	if _, err := NewReader(map[string]any{"dir": t.TempDir(), "ackMode": "sometimes"}); err == nil {
+		t.Error("bad ackMode accepted")
+	}
 }
 
 func TestReaderStopHaltsPolling(t *testing.T) {

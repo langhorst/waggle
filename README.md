@@ -42,7 +42,7 @@ replay.
 | Message                    | `internal/message.Message` — raw bytes + canonical tree + states  |
 | Message Channel            | Go channels + the per-destination SQLite queue                    |
 | Channel Adapter (inbound)  | `mllp-listener`, `astm-listener`, `http-listener`, `file-reader` |
-| Polling Consumer           | the `file-reader` source                                          |
+| Polling Consumer           | the `file-reader` source (`ackMode` like the network sources)     |
 | Pipes and Filters          | the channel pipeline (`internal/channel`)                         |
 | Message Filter             | `filter:` script — distinct step, drops retain the message        |
 | Message Translator         | `transformers:` script chain (goja JavaScript)                    |
