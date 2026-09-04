@@ -11,7 +11,7 @@ FUZZTIME ?= 30s
 .DEFAULT_GOAL := help
 
 .PHONY: help build release run tui test test-race cover bench fuzz \
-        fmt fmt-check vet lint check clean
+        fmt fmt-check vet tidy-check golangci lint check clean
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -60,7 +60,13 @@ fmt-check: ## Fail if any file needs formatting
 vet: ## Run go vet
 	$(GO) vet $(PKGS)
 
-lint: fmt-check vet ## Formatting check + vet
+tidy-check: ## Fail if go.mod/go.sum are not tidy
+	$(GO) mod tidy -diff
+
+golangci: ## Run golangci-lint (install: https://golangci-lint.run/docs/welcome/install/)
+	golangci-lint run $(PKGS)
+
+lint: fmt-check vet tidy-check golangci ## Formatting check + vet + tidy + golangci-lint
 
 check: lint test-race ## The pre-push gate: lint + race tests
 
