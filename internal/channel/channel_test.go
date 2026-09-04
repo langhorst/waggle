@@ -431,6 +431,32 @@ func TestSerializeFailureFailsTheMessage(t *testing.T) {
 	}
 }
 
+// TestDestinationScriptSetAck: response.setAck from a destination-level
+// script reaches the source ACK. It used to be lost with the per-destination
+// message copy.
+func TestDestinationScriptSetAck(t *testing.T) {
+	out := &fakeOut{}
+	ch, src := newTestChannel(NewMemoryRecorder(), &Destination{
+		ID: "d1", OutType: hl7Type(), Adapter: out,
+		Translate: []TranslateFunc{func(m *message.Message) error {
+			m.AckCode, m.AckText = "AR", "destination says no"
+			return nil
+		}},
+	})
+	if err := ch.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer ch.Stop()
+
+	d := deliverAndWait(t, src, sampleHL7)
+	if d.Code != "AR" || d.Text != "destination says no" {
+		t.Fatalf("decision = %+v, want the destination script's setAck", d)
+	}
+	if len(out.sent()) != 1 {
+		t.Error("setAck must not stop delivery")
+	}
+}
+
 func TestLifecycle(t *testing.T) {
 	rec := &recordingRecorder{}
 	out := &fakeOut{}

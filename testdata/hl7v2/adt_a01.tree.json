@@ -9,71 +9,87 @@
           "children": [
             {
               "name": "1",
-              "value": "|"
+              "value": "|",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "2",
           "children": [
             {
               "name": "1",
-              "value": "^~\\\u0026"
+              "value": "^~\\\u0026",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "3",
           "children": [
             {
               "name": "1",
-              "value": "SENDAPP"
+              "value": "SENDAPP",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "4",
           "children": [
             {
               "name": "1",
-              "value": "SENDFAC"
+              "value": "SENDFAC",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "5",
           "children": [
             {
               "name": "1",
-              "value": "RECVAPP"
+              "value": "RECVAPP",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "6",
           "children": [
             {
               "name": "1",
-              "value": "RECVFAC"
+              "value": "RECVFAC",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "7",
           "children": [
             {
               "name": "1",
-              "value": "20260730120000"
+              "value": "20260730120000",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "8",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "9",
@@ -83,48 +99,60 @@
               "children": [
                 {
                   "name": "1",
-                  "value": "ADT"
+                  "value": "ADT",
+                  "kind": "component"
                 },
                 {
                   "name": "2",
-                  "value": "A01"
+                  "value": "A01",
+                  "kind": "component"
                 },
                 {
                   "name": "3",
-                  "value": "ADT_A01"
+                  "value": "ADT_A01",
+                  "kind": "component"
                 }
-              ]
+              ],
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "10",
           "children": [
             {
               "name": "1",
-              "value": "MSG00001"
+              "value": "MSG00001",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "11",
           "children": [
             {
               "name": "1",
-              "value": "P"
+              "value": "P",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "12",
           "children": [
             {
               "name": "1",
-              "value": "2.5.1"
+              "value": "2.5.1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         }
-      ]
+      ],
+      "kind": "segment"
     },
     {
       "name": "EVN",
@@ -134,20 +162,25 @@
           "children": [
             {
               "name": "1",
-              "value": "A01"
+              "value": "A01",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "2",
           "children": [
             {
               "name": "1",
-              "value": "20260730120000"
+              "value": "20260730120000",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         }
-      ]
+      ],
+      "kind": "segment"
     },
     {
       "name": "PID",
@@ -157,17 +190,21 @@
           "children": [
             {
               "name": "1",
-              "value": "1"
+              "value": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "2",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "3",
@@ -177,56 +214,71 @@
               "children": [
                 {
                   "name": "1",
-                  "value": "MRN12345"
+                  "value": "MRN12345",
+                  "kind": "component"
                 },
                 {
-                  "name": "2"
+                  "name": "2",
+                  "kind": "component"
                 },
                 {
-                  "name": "3"
+                  "name": "3",
+                  "kind": "component"
                 },
                 {
                   "name": "4",
-                  "value": "HOSP"
+                  "value": "HOSP",
+                  "kind": "component"
                 },
                 {
                   "name": "5",
-                  "value": "MR"
+                  "value": "MR",
+                  "kind": "component"
                 }
-              ]
+              ],
+              "kind": "repetition"
             },
             {
               "name": "2",
               "children": [
                 {
                   "name": "1",
-                  "value": "SSN987654"
+                  "value": "SSN987654",
+                  "kind": "component"
                 },
                 {
-                  "name": "2"
+                  "name": "2",
+                  "kind": "component"
                 },
                 {
-                  "name": "3"
+                  "name": "3",
+                  "kind": "component"
                 },
                 {
                   "name": "4",
-                  "value": "USA"
+                  "value": "USA",
+                  "kind": "component"
                 },
                 {
                   "name": "5",
-                  "value": "SS"
+                  "value": "SS",
+                  "kind": "component"
                 }
-              ]
+              ],
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "4",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "5",
@@ -236,65 +288,81 @@
               "children": [
                 {
                   "name": "1",
-                  "value": "DOE"
+                  "value": "DOE",
+                  "kind": "component"
                 },
                 {
                   "name": "2",
-                  "value": "JOHN"
+                  "value": "JOHN",
+                  "kind": "component"
                 },
                 {
                   "name": "3",
-                  "value": "Q"
+                  "value": "Q",
+                  "kind": "component"
                 },
                 {
                   "name": "4",
-                  "value": "JR"
+                  "value": "JR",
+                  "kind": "component"
                 }
-              ]
+              ],
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "6",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "7",
           "children": [
             {
               "name": "1",
-              "value": "20200101"
+              "value": "20200101",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "8",
           "children": [
             {
               "name": "1",
-              "value": "M"
+              "value": "M",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "9",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "10",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "11",
@@ -304,28 +372,36 @@
               "children": [
                 {
                   "name": "1",
-                  "value": "123 MAIN ST"
+                  "value": "123 MAIN ST",
+                  "kind": "component"
                 },
                 {
-                  "name": "2"
+                  "name": "2",
+                  "kind": "component"
                 },
                 {
                   "name": "3",
-                  "value": "METROPOLIS"
+                  "value": "METROPOLIS",
+                  "kind": "component"
                 },
                 {
                   "name": "4",
-                  "value": "IL"
+                  "value": "IL",
+                  "kind": "component"
                 },
                 {
                   "name": "5",
-                  "value": "62960"
+                  "value": "62960",
+                  "kind": "component"
                 }
-              ]
+              ],
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         }
-      ]
+      ],
+      "kind": "segment"
     },
     {
       "name": "OBX",
@@ -335,18 +411,22 @@
           "children": [
             {
               "name": "1",
-              "value": "1"
+              "value": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "2",
           "children": [
             {
               "name": "1",
-              "value": "TX"
+              "value": "TX",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "3",
@@ -356,34 +436,43 @@
               "children": [
                 {
                   "name": "1",
-                  "value": "NOTE"
+                  "value": "NOTE",
+                  "kind": "component"
                 },
                 {
                   "name": "2",
-                  "value": "Progress Note"
+                  "value": "Progress Note",
+                  "kind": "component"
                 }
-              ]
+              ],
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "4",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "5",
           "children": [
             {
               "name": "1",
-              "value": "Patient admitted \u0026 stable"
+              "value": "Patient admitted \u0026 stable",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         }
-      ]
+      ],
+      "kind": "segment"
     },
     {
       "name": "OBX",
@@ -393,18 +482,22 @@
           "children": [
             {
               "name": "1",
-              "value": "2"
+              "value": "2",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "2",
           "children": [
             {
               "name": "1",
-              "value": "NM"
+              "value": "NM",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "3",
@@ -417,49 +510,62 @@
                   "children": [
                     {
                       "name": "1",
-                      "value": "WT"
+                      "value": "WT",
+                      "kind": "subcomponent"
                     },
                     {
                       "name": "2",
-                      "value": "BODY"
+                      "value": "BODY",
+                      "kind": "subcomponent"
                     }
-                  ]
+                  ],
+                  "kind": "component"
                 },
                 {
                   "name": "2",
-                  "value": "Weight"
+                  "value": "Weight",
+                  "kind": "component"
                 }
-              ]
+              ],
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "4",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "5",
           "children": [
             {
               "name": "1",
-              "value": "72.5"
+              "value": "72.5",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "6",
           "children": [
             {
               "name": "1",
-              "value": "kg"
+              "value": "kg",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         }
-      ]
+      ],
+      "kind": "segment"
     }
   ]
 }

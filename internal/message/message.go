@@ -17,11 +17,13 @@ type Node struct {
 	Value    string  `json:"value,omitempty"`
 	Children []*Node `json:"children,omitempty"`
 
-	// Kind refines the node for formats whose wire model is richer than
-	// positional text. Delimited formats leave it empty. jsonfmt uses the
-	// leaf kinds "string", "number", "bool", "null" and the container kinds
+	// Kind refines the node beyond its position. jsonfmt uses the leaf
+	// kinds "string", "number", "bool", "null" and the container kinds
 	// "object", "array" so values round-trip typed and {"a":[1]} stays
-	// distinct from {"a":1}.
+	// distinct from {"a":1}; xmlfmt marks elements, attributes, and text;
+	// delimited formats record the structural level (segment, field,
+	// repetition, component, subcomponent) so a node's level is known
+	// without searching from the root.
 	Kind string `json:"kind,omitempty"`
 }
 

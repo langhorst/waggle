@@ -24,6 +24,7 @@ type env struct {
 
 	created   []*scriptMsg
 	rejection *channel.Rejection
+	log       *slog.Logger
 }
 
 // scriptMsg is a message tree exposed to the script — either the live
@@ -33,12 +34,12 @@ type scriptMsg struct {
 	tree func() *message.Node
 }
 
-func newEnv(rt *goja.Runtime, m *message.Message) (*env, error) {
+func newEnv(rt *goja.Runtime, m *message.Message, log *slog.Logger) (*env, error) {
 	dt, ok := format.Get(m.DataType)
 	if !ok {
 		return nil, fmt.Errorf("unknown data type %q", m.DataType)
 	}
-	e := &env{rt: rt, m: m}
+	e := &env{rt: rt, m: m, log: log}
 
 	live := &scriptMsg{dt: dt, tree: func() *message.Node { return m.Tree }}
 	msgObj := e.wrapMsg(live, 0)
@@ -132,7 +133,7 @@ func (e *env) wrapSegment(sm *scriptMsg, seg *message.Node) map[string]any {
 }
 
 func (e *env) loggerObj() map[string]any {
-	log := slog.Default().With("script.channel", e.m.ChannelID, "script.message", e.m.ID)
+	log := e.log.With("script.channel", e.m.ChannelID, "script.message", e.m.ID)
 	join := func(args []goja.Value) string {
 		parts := make([]string, len(args))
 		for i, a := range args {

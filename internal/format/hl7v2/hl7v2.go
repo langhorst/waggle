@@ -131,7 +131,7 @@ func (DataType) Parse(raw []byte) (*message.Node, error) {
 		if !segNameRe.MatchString(name) {
 			return nil, fmt.Errorf("hl7v2: segment %d: invalid segment name %q", i+1, name)
 		}
-		seg := &message.Node{Name: name}
+		seg := delimited.NewSegment(name)
 		if rawFields := headerRawFields(name); rawFields > 0 {
 			if len(line) < 4 || line[3] != dl.Field {
 				return nil, fmt.Errorf("hl7v2: segment %d: header segment %s has inconsistent field separator", i+1, name)

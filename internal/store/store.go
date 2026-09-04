@@ -38,6 +38,7 @@ type Store struct {
 	retention map[string]int // channel -> max messages; -1 unlimited
 
 	inserts     atomic.Int64
+	pruneReq    chan struct{} // nudges pruneLoop; never blocks Record
 	pruneCancel context.CancelFunc
 	pruneDone   chan struct{}
 }
@@ -54,7 +55,7 @@ func Open(path string) (*Store, error) {
 	// this way and it sidesteps SQLITE_BUSY between our own goroutines.
 	db.SetMaxOpenConns(1)
 
-	s := &Store{db: db, retention: map[string]int{}}
+	s := &Store{db: db, retention: map[string]int{}, pruneReq: make(chan struct{}, 1)}
 	if err := s.migrate(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -152,7 +153,12 @@ func (s *Store) Record(ctx context.Context, m *message.Message) error {
 	m.ID = id
 
 	if s.inserts.Add(1)%pruneCheckEvery == 0 {
-		s.pruneAll(ctx)
+		// Retention runs on its own goroutine: a DELETE with subselects
+		// does not belong on the pipeline's write path.
+		select {
+		case s.pruneReq <- struct{}{}:
+		default:
+		}
 	}
 	return nil
 }
@@ -231,8 +237,9 @@ func (s *Store) pruneLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.pruneAll(context.Background())
+		case <-s.pruneReq:
 		}
+		s.pruneAll(ctx)
 	}
 }
 

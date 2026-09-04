@@ -287,7 +287,7 @@ func (s *Script) run(m *message.Message, timeout time.Duration) (goja.Value, err
 		return nil, fmt.Errorf("script %s: not compiled", s.path)
 	}
 
-	env, err := newEnv(s.rt, m)
+	env, err := newEnv(s.rt, m, s.log)
 	if err != nil {
 		return nil, err
 	}

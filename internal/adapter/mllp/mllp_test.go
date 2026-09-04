@@ -2,6 +2,9 @@ package mllp
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -78,6 +81,43 @@ func startListener(t *testing.T, settings map[string]any, deliver adapter.Delive
 	}
 	t.Cleanup(func() { s.Close() })
 	return l, s
+}
+
+// TestSendHonoursContextCancel: a receiver that accepts the frame and never
+// answers must not hold Send (and the sender's mutex) past the context.
+func TestSendHonoursContextCancel(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = io.Copy(io.Discard, conn) // read forever, never ACK
+	}()
+	s, err := NewSender(map[string]any{"addr": ln.Addr().String(), "ackTimeout": "30s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = s.Send(ctx, []byte(sampleMsg), nil)
+	if err == nil {
+		t.Fatal("Send succeeded without an ACK")
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("Send ignored the context; took %v", time.Since(start))
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want context deadline", err)
+	}
 }
 
 func TestLoopbackImmediateAck(t *testing.T) {

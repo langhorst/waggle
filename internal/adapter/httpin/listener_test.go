@@ -209,8 +209,21 @@ func TestStopUnblocksHeldRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	type result struct {
+		code int
+		body map[string]any
+	}
+	results := make(chan result, 1)
 	go func() {
-		_, _ = http.Post("http://"+l.Addr()+"/", "text/plain", bytes.NewReader([]byte("held")))
+		resp, err := http.Post("http://"+l.Addr()+"/", "text/plain", bytes.NewReader([]byte("held")))
+		if err != nil {
+			results <- result{}
+			return
+		}
+		defer resp.Body.Close()
+		var body map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		results <- result{code: resp.StatusCode, body: body}
 	}()
 	time.Sleep(100 * time.Millisecond) // let the request arrive and block
 	stopped := make(chan struct{})
@@ -219,6 +232,16 @@ func TestStopUnblocksHeldRequests(t *testing.T) {
 	case <-stopped:
 	case <-time.After(10 * time.Second):
 		t.Fatal("Stop did not unblock the held request")
+	}
+	// The message was recorded; the caller must learn that explicitly
+	// (it used to get an implicit empty 200).
+	select {
+	case r := <-results:
+		if r.code != http.StatusAccepted || r.body["messageId"] != float64(1) {
+			t.Fatalf("held request on Stop = %d %v, want 202 with the message id", r.code, r.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("held request never got a response")
 	}
 }
 

@@ -123,10 +123,15 @@ func (s *Sender) writeLocked(p []byte) error {
 func (s *Sender) Send(ctx context.Context, payload []byte, meta map[string]string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	if err := s.ensureConnLocked(ctx); err != nil {
-		return err // receiver down: retry later
+		return err
 	}
+	// Cancellation (shutdown) must unblock a session parked on a stalled
+	// instrument: expiring the deadline is the only way to interrupt a
+	// blocked net.Conn read or write.
+	conn := s.conn
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stop()
 
 	// Establishment.
 	if err := s.writeLocked([]byte{enq}); err != nil {

@@ -187,7 +187,7 @@ func (DataType) Parse(raw []byte) (*message.Node, error) {
 		if !recNameRe.MatchString(name) {
 			return nil, fmt.Errorf("astm: record %d: invalid record type %q", i+1, name)
 		}
-		rec := &message.Node{Name: name}
+		rec := delimited.NewSegment(name)
 		if headerRawFields(name) > 0 {
 			if len(line) < 2 || line[1] != dl.Field {
 				return nil, fmt.Errorf("astm: record %d: H record has inconsistent field separator", i+1)

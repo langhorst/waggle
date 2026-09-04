@@ -16,6 +16,7 @@ type SenderConfig struct {
 	Addr           string           `yaml:"addr"`
 	ConnectTimeout adapter.Duration `yaml:"connectTimeout"` // default 10s
 	AckTimeout     adapter.Duration `yaml:"ackTimeout"`     // default 30s
+	WriteTimeout   adapter.Duration `yaml:"writeTimeout"`   // default 10s
 	MaxAckSize     int              `yaml:"maxAckSize"`     // default 1 MiB
 }
 
@@ -49,6 +50,9 @@ func NewSender(settings map[string]any) (*Sender, error) {
 	}
 	if cfg.AckTimeout <= 0 {
 		cfg.AckTimeout = adapter.Duration(30 * time.Second)
+	}
+	if cfg.WriteTimeout <= 0 {
+		cfg.WriteTimeout = adapter.Duration(10 * time.Second)
 	}
 	if cfg.MaxAckSize <= 0 {
 		cfg.MaxAckSize = 1 << 20
@@ -90,6 +94,20 @@ func (s *Sender) ensureConnLocked(ctx context.Context) error {
 	return nil
 }
 
+// ctxOr reports the context's error when it is the reason an I/O call
+// failed, so callers see "context canceled" rather than a bare timeout.
+func ctxOr(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	// The read deadline may be the context's own deadline, in which case
+	// the I/O timeout fires in the same instant the context expires.
+	if dl, ok := ctx.Deadline(); ok && !time.Now().Before(dl) {
+		return context.DeadlineExceeded
+	}
+	return err
+}
+
 func (s *Sender) Send(ctx context.Context, payload []byte, meta map[string]string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -97,20 +115,30 @@ func (s *Sender) Send(ctx context.Context, payload []byte, meta map[string]strin
 	if err := s.ensureConnLocked(ctx); err != nil {
 		return err // transient: receiver down
 	}
-	if err := writeFrame(s.conn, payload); err != nil {
+	// Cancellation (shutdown) must unblock a send parked on a stalled
+	// peer: expiring the deadline is the only way to interrupt a blocked
+	// net.Conn read or write.
+	conn := s.conn
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stop()
+
+	_ = conn.SetWriteDeadline(time.Now().Add(time.Duration(s.cfg.WriteTimeout)))
+	err := writeFrame(conn, payload)
+	_ = conn.SetWriteDeadline(time.Time{})
+	if err != nil {
 		s.dropConnLocked()
-		return fmt.Errorf("mllp-sender: write: %w", err)
+		return fmt.Errorf("mllp-sender: write: %w", ctxOr(ctx, err))
 	}
 	deadline := time.Now().Add(time.Duration(s.cfg.AckTimeout))
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
 		deadline = ctxDeadline
 	}
-	_ = s.conn.SetReadDeadline(deadline)
+	_ = conn.SetReadDeadline(deadline)
 	ackRaw, err := readFrame(s.br, s.cfg.MaxAckSize)
-	_ = s.conn.SetReadDeadline(time.Time{})
+	_ = conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		s.dropConnLocked()
-		return fmt.Errorf("mllp-sender: waiting for ACK: %w", err)
+		return fmt.Errorf("mllp-sender: waiting for ACK: %w", ctxOr(ctx, err))
 	}
 
 	code, text, err := AckStatus(ackRaw)

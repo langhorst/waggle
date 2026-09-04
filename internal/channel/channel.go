@@ -446,11 +446,6 @@ func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDe
 
 	// Recipient List fan-out.
 	decision := adapter.AckDecision{Code: "AA"}
-	// A channel-level script may have set an explicit ACK without stopping
-	// processing (response.setAck).
-	if m.AckCode != "" {
-		decision = adapter.AckDecision{Code: m.AckCode, Text: m.AckText}
-	}
 	for _, d := range c.Destinations {
 		if err := c.sendTo(ctx, d, m); err != nil {
 			log.Warn("destination delivery failed", "destination", d.ID, "error", err)
@@ -466,6 +461,11 @@ func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDe
 				}
 			}
 		}
+	}
+	// An explicit response.setAck, from the channel chain or any
+	// destination chain, wins over the automatic decision.
+	if m.AckCode != "" {
+		decision = adapter.AckDecision{Code: m.AckCode, Text: m.AckText}
 	}
 	return decision
 }
@@ -516,6 +516,12 @@ func (c *Channel) sendTo(ctx context.Context, d *Destination, m *message.Message
 		if err := translate(dm); err != nil {
 			return c.failDestination(ctx, m, d, nil, fmt.Errorf("translator %d: %w", i+1, err))
 		}
+	}
+	// response.setAck in a destination script applies to the source ACK
+	// like a channel-level one; it used to vanish with the per-destination
+	// copy.
+	if dm.AckCode != "" {
+		m.AckCode, m.AckText = dm.AckCode, dm.AckText
 	}
 
 	payload, err := d.OutType.Serialize(dm.Tree)

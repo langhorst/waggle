@@ -224,7 +224,10 @@ func (l *Listener) handle(ctx context.Context, w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	rec, err := deliver(ctx, body, meta)
+	// The handoff itself must not be cut short by Stop: once the request
+	// is read the message is either recorded whole or refused, never
+	// half-recorded because the listener's context went away mid-insert.
+	rec, err := deliver(context.WithoutCancel(ctx), body, meta)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": err.Error()})
 		return
@@ -245,6 +248,14 @@ func (l *Listener) handle(ctx context.Context, w http.ResponseWriter, r *http.Re
 			"code": "AE", "text": "processing timed out", "messageId": rec.MessageID,
 		})
 	case <-ctx.Done():
+		// Stop released the hold. The message is recorded and will be
+		// processed; only the outcome is unknown, which is what 202 says.
+		// Returning without writing produced an implicit empty 200.
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"messageId": rec.MessageID, "text": "listener stopped before the outcome was known",
+		})
+	case <-r.Context().Done():
+		// Client went away; nobody to answer.
 	}
 }
 
