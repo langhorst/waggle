@@ -25,7 +25,25 @@ type fakeBackend struct {
 	diffs    map[int64][]message.DiffEntry
 }
 
-func (f *fakeBackend) Channels() []engine.Info { return f.channels }
+func (f *fakeBackend) ChannelSummaries(ctx context.Context) ([]engine.ChannelSummary, error) {
+	out := make([]engine.ChannelSummary, 0, len(f.channels))
+	for _, info := range f.channels {
+		s, _ := f.ChannelSummary(ctx, info.ID)
+		out = append(out, s)
+	}
+	return out, nil
+}
+func (f *fakeBackend) ChannelSummary(ctx context.Context, channelID string) (engine.ChannelSummary, error) {
+	for _, info := range f.channels {
+		if info.ID != channelID {
+			continue
+		}
+		counts, _ := f.MessageCounts(ctx, channelID)
+		depth, _ := f.QueueDepth(ctx, channelID)
+		return engine.ChannelSummary{Info: info, Counts: counts, QueueDepth: depth}, nil
+	}
+	return engine.ChannelSummary{}, engine.ErrUnknownChannel
+}
 func (f *fakeBackend) ListMessages(ctx context.Context, channelID string, q store.ListQuery) ([]store.MessageSummary, error) {
 	list := f.messages[channelID]
 	if q.State == "" {

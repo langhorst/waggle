@@ -26,6 +26,9 @@ import (
 type ScriptEngine interface {
 	CompileFilter(path string) (channel.FilterFunc, error)
 	CompileTranslator(path string) (channel.TranslateFunc, error)
+	// CompileErrors reports the last compile error per script path ("" when
+	// healthy) for the UIs.
+	CompileErrors() map[string]string
 }
 
 // Options configures a new Engine.
@@ -275,7 +278,7 @@ func (e *Engine) managed(id string) (*managed, error) {
 	defer e.mu.Unlock()
 	m, ok := e.channels[id]
 	if !ok {
-		return nil, fmt.Errorf("engine: unknown channel %q", id)
+		return nil, fmt.Errorf("%w %q", ErrUnknownChannel, id)
 	}
 	return m, nil
 }

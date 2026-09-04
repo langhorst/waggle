@@ -324,7 +324,7 @@ func TestScriptEndpoints(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("channel scripts = %d", code)
 	}
-	var refs []scriptRef
+	var refs []engine.ScriptRef
 	h.decode(raw, &refs)
 	if len(refs) != 1 || refs[0].Role != "transformer" || refs[0].LastError != "" {
 		t.Fatalf("refs = %+v", refs)

@@ -47,9 +47,7 @@ type Model struct {
 	errText       string
 
 	// Channel list.
-	channels   []engine.Info
-	counts     map[string]map[message.State]int
-	depths     map[string]map[string]int
+	channels   []engine.ChannelSummary
 	chanCursor int
 
 	// Message list.
@@ -76,8 +74,6 @@ func New(backend Backend) Model {
 	m := Model{
 		backend: backend,
 		ctx:     context.Background(),
-		counts:  map[string]map[message.State]int{},
-		depths:  map[string]map[string]int{},
 		width:   100,
 		height:  30,
 	}
@@ -261,21 +257,29 @@ func (m *Model) refresh() {
 }
 
 func (m *Model) reloadChannels() {
-	m.channels = m.backend.Channels()
+	channels, err := m.backend.ChannelSummaries(m.ctx)
+	if err != nil {
+		m.errText = err.Error()
+		return
+	}
+	m.errText = ""
+	m.channels = channels
 	if m.chanCursor >= len(m.channels) {
 		m.chanCursor = max(0, len(m.channels)-1)
 	}
-	for _, ch := range m.channels {
-		m.reloadCounts(ch.ID)
-	}
 }
 
+// reloadCounts refreshes one channel's row after a message event.
 func (m *Model) reloadCounts(channelID string) {
-	if counts, err := m.backend.MessageCounts(m.ctx, channelID); err == nil {
-		m.counts[channelID] = counts
+	summary, err := m.backend.ChannelSummary(m.ctx, channelID)
+	if err != nil {
+		return
 	}
-	if depth, err := m.backend.QueueDepth(m.ctx, channelID); err == nil {
-		m.depths[channelID] = depth
+	for i := range m.channels {
+		if m.channels[i].ID == channelID {
+			m.channels[i] = summary
+			return
+		}
 	}
 }
 
@@ -306,15 +310,8 @@ func (m *Model) openDetail(id int64) {
 	m.detail = detail
 	m.view = viewDetail
 
-	// Stages for the tree tab: received, transformed (when present), and
-	// each destination with a stored payload.
-	m.stages = []string{engine.StageReceived}
-	if len(detail.Transformed) > 0 {
-		m.stages = append(m.stages, engine.StageTransformed)
-	}
-	for _, d := range detail.Destinations {
-		m.stages = append(m.stages, "dest:"+d.DestinationID)
-	}
+	// Stages for the tree tab, the same list the web UI offers.
+	m.stages = engine.Stages(detail)
 	if m.stageIdx >= len(m.stages) {
 		m.stageIdx = 0
 	}

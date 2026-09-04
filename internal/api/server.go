@@ -111,6 +111,22 @@ func (s *Server) writeInternalError(w http.ResponseWriter, what string, err erro
 	s.writeError(w, http.StatusInternalServerError, errors.New(what+" failed"))
 }
 
+// writeEngineError maps engine errors onto status codes.
+func (s *Server) writeEngineError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, engine.ErrUnknownChannel):
+		s.writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, engine.ErrUnknownAction):
+		s.writeError(w, http.StatusBadRequest, err)
+	case errors.Is(err, store.ErrNotFound):
+		s.writeError(w, http.StatusNotFound, err)
+	default:
+		// Lifecycle failures (a port in use, a broken script) are the
+		// caller's business to see.
+		s.writeError(w, http.StatusInternalServerError, err)
+	}
+}
+
 func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -148,27 +164,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// channelInfo is the list payload: engine info enriched with counts.
-type channelInfo struct {
-	engine.Info
-	Counts     map[message.State]int `json:"counts,omitempty"`
-	QueueDepth map[string]int        `json:"queueDepth,omitempty"`
-}
-
 func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
-	infos := s.Eng.Channels()
-	out := make([]channelInfo, 0, len(infos))
-	for _, info := range infos {
-		ci := channelInfo{Info: info}
-		if st := s.Eng.Store(); st != nil {
-			if counts, err := st.MessageCounts(r.Context(), info.ID); err == nil {
-				ci.Counts = counts
-			}
-			if depth, err := st.QueueDepth(r.Context(), info.ID); err == nil {
-				ci.QueueDepth = depth
-			}
-		}
-		out = append(out, ci)
+	out, err := s.Eng.ChannelSummaries(r.Context())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
 	}
 	s.writeJSON(w, http.StatusOK, out)
 }
@@ -176,23 +176,8 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 func (s *Server) lifecycle(action string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		var err error
-		switch action {
-		case "start":
-			err = s.Eng.Start(r.Context(), id)
-		case "stop":
-			err = s.Eng.Stop(id)
-		case "pause":
-			err = s.Eng.Pause(id)
-		case "reload":
-			err = s.Eng.ReloadChannel(r.Context(), id)
-		}
-		if err != nil {
-			status := http.StatusInternalServerError
-			if strings.Contains(err.Error(), "unknown channel") {
-				status = http.StatusNotFound
-			}
-			s.writeError(w, status, err)
+		if err := s.Eng.Lifecycle(r.Context(), id, action); err != nil {
+			s.writeEngineError(w, err)
 			return
 		}
 		ch, _ := s.Eng.Channel(id)
@@ -362,41 +347,11 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "requeued"})
 }
 
-// scriptRef describes one script a channel references.
-type scriptRef struct {
-	Role string `json:"role"` // "filter", "transformer", "destination-filter", ...
-	Path string `json:"path"` // resolved path, usable with /api/scripts
-	// LastError is the most recent compile error ("" when healthy).
-	LastError string `json:"lastError,omitempty"`
-}
-
 func (s *Server) handleChannelScripts(w http.ResponseWriter, r *http.Request) {
-	cfg, ok := s.Eng.Config(r.PathValue("id"))
-	if !ok {
-		s.writeError(w, http.StatusNotFound, fmt.Errorf("unknown channel %q", r.PathValue("id")))
+	refs, err := s.Eng.ScriptRefs(r.PathValue("id"))
+	if err != nil {
+		s.writeEngineError(w, err)
 		return
-	}
-	var compileErrors map[string]string
-	if s.Scripts != nil {
-		compileErrors = s.Scripts.Scripts()
-	}
-	refs := []scriptRef{}
-	add := func(role, p string) {
-		if p == "" {
-			return
-		}
-		resolved := cfg.ResolvePath(p)
-		refs = append(refs, scriptRef{Role: role, Path: resolved, LastError: compileErrors[resolved]})
-	}
-	add("filter", cfg.Filter)
-	for _, t := range cfg.Transformers {
-		add("transformer", t)
-	}
-	for _, d := range cfg.Destinations {
-		add("destination-filter:"+d.ID, d.Filter)
-		for _, t := range d.Transformers {
-			add("destination-transformer:"+d.ID, t)
-		}
 	}
 	s.writeJSON(w, http.StatusOK, refs)
 }
@@ -524,7 +479,7 @@ func (s *Server) handleScriptWrite(w http.ResponseWriter, r *http.Request) {
 	// Recompile immediately so the editor gets compile feedback; a failed
 	// compile keeps the previous program active in the pipeline.
 	if s.Scripts != nil {
-		if err := s.Scripts.Reload(path); err != nil && !strings.Contains(err.Error(), "not loaded") {
+		if err := s.Scripts.Reload(path); err != nil && !errors.Is(err, script.ErrNotLoaded) {
 			s.writeJSON(w, http.StatusBadRequest, map[string]string{
 				"status": "saved-with-errors",
 				"error":  err.Error(),

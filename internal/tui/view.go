@@ -68,17 +68,10 @@ func (m Model) viewChannels() string {
 		b.WriteByte('\n')
 	}
 	for i, ch := range m.channels {
-		counts := m.counts[ch.ID]
-		depth := 0
-		for _, n := range m.depths[ch.ID] {
-			depth += n
-		}
 		status := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColors[ch.Status])).Render(string(ch.Status))
 		line := fmt.Sprintf("%-20s %-24s %-9s %8d %8d %8d %8d %7d",
 			truncate(ch.ID, 20), truncate(ch.Name, 24), status,
-			counts[message.StateReceived]+counts[message.StateTransformed],
-			counts[message.StateSent], counts[message.StateError],
-			counts[message.StateFiltered], depth)
+			ch.Received(), ch.Sent(), ch.Errors(), ch.Filtered(), ch.Queued())
 		if i == m.chanCursor {
 			line = cursorStyle.Render("> " + line)
 		} else {

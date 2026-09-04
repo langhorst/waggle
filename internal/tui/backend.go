@@ -18,11 +18,12 @@ import (
 // wraps, a TUI-over-API variant can implement this later without touching
 // the views.
 type Backend interface {
-	Channels() []engine.Info
+	// ChannelSummaries lists channels with counts, the same view model the
+	// web dashboard and JSON API use.
+	ChannelSummaries(ctx context.Context) ([]engine.ChannelSummary, error)
+	ChannelSummary(ctx context.Context, channelID string) (engine.ChannelSummary, error)
 	ListMessages(ctx context.Context, channelID string, q store.ListQuery) ([]store.MessageSummary, error)
 	GetMessage(ctx context.Context, id int64) (*store.MessageDetail, error)
-	MessageCounts(ctx context.Context, channelID string) (map[message.State]int, error)
-	QueueDepth(ctx context.Context, channelID string) (map[string]int, error)
 	MessageTree(ctx context.Context, id int64, stage string) (*message.Node, string, error)
 	MessageDiff(ctx context.Context, id int64, destID string) ([]message.DiffEntry, error)
 	Subscribe(buf int) (<-chan events.Event, func())
@@ -34,7 +35,13 @@ type EngineBackend struct {
 	Eng *engine.Engine
 }
 
-func (b EngineBackend) Channels() []engine.Info { return b.Eng.Channels() }
+func (b EngineBackend) ChannelSummaries(ctx context.Context) ([]engine.ChannelSummary, error) {
+	return b.Eng.ChannelSummaries(ctx)
+}
+
+func (b EngineBackend) ChannelSummary(ctx context.Context, channelID string) (engine.ChannelSummary, error) {
+	return b.Eng.ChannelSummary(ctx, channelID)
+}
 
 func (b EngineBackend) ListMessages(ctx context.Context, channelID string, q store.ListQuery) ([]store.MessageSummary, error) {
 	return b.Eng.Store().ListMessages(ctx, channelID, q)
@@ -42,14 +49,6 @@ func (b EngineBackend) ListMessages(ctx context.Context, channelID string, q sto
 
 func (b EngineBackend) GetMessage(ctx context.Context, id int64) (*store.MessageDetail, error) {
 	return b.Eng.Store().GetMessage(ctx, id)
-}
-
-func (b EngineBackend) MessageCounts(ctx context.Context, channelID string) (map[message.State]int, error) {
-	return b.Eng.Store().MessageCounts(ctx, channelID)
-}
-
-func (b EngineBackend) QueueDepth(ctx context.Context, channelID string) (map[string]int, error) {
-	return b.Eng.Store().QueueDepth(ctx, channelID)
 }
 
 func (b EngineBackend) MessageTree(ctx context.Context, id int64, stage string) (*message.Node, string, error) {
