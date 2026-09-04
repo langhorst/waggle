@@ -50,6 +50,13 @@ type Inbound interface {
 	Stop() error
 }
 
+// Addresser is implemented by inbound adapters that bind a network address:
+// Addr reports the bound address once Start has returned (useful when
+// configured with port 0), and "" before that.
+type Addresser interface {
+	Addr() string
+}
+
 // Outbound is an outbound Channel Adapter (message destination). Send
 // delivers one serialized payload; a returned error is transient (retry
 // with backoff) unless wrapped as Permanent.

@@ -1,39 +1,32 @@
-package engine
+package engine_test
 
 import (
 	"context"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/langhorst/waggle/internal/adapter/mllp"
-	"github.com/langhorst/waggle/internal/config"
-	"github.com/langhorst/waggle/internal/script"
 	"github.com/langhorst/waggle/internal/store"
+	"github.com/langhorst/waggle/internal/testutil"
 )
 
-// TestMLLPToFileEndToEnd is the plan's verification scenario: an MLLP
-// listener source in destination-ACK mode, a JS transformer, a waitForAck
-// file destination — fired at with a real MLLP sender, checked for the ACK
-// round trip, stored lifecycle, and transformed output.
+// TestMLLPToFileEndToEnd: an MLLP listener source in destination-ACK mode,
+// a JS transformer, a waitForAck file destination, fired at with a real
+// MLLP sender and checked for the ACK round trip, stored lifecycle, and
+// transformed output.
 func TestMLLPToFileEndToEnd(t *testing.T) {
-	work := t.TempDir()
-	outDir := filepath.Join(work, "out")
-	scriptsDir := filepath.Join(work, "scripts")
-	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(scriptsDir, "validate.js"), []byte(`
+	f := testutil.NewFixture(t)
+	ctx := context.Background()
+	outDir := filepath.Join(f.Work, "out")
+	testutil.WriteFile(t, filepath.Join(f.Work, "scripts", "validate.js"), `
 function transform(msg) {
 	if (!msg.get('PID-3')) { response.reject('AR', 'missing patient identifier'); }
 	msg.set('PID-5.1', msg.get('PID-5.1').toUpperCase());
-}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+}`)
 
-	chYAML := `
+	ch := f.StartChannelYAML(t, "mllp-feed", `
 id: mllp-feed
 source:
   type: mllp-listener
@@ -48,42 +41,9 @@ destinations:
     waitForAck: true
     adapter:
       type: file-writer
-      settings: {dir: ` + outDir + `, pattern: "{id}.hl7"}
-`
-	chPath := filepath.Join(work, "channel.yaml")
-	if err := os.WriteFile(chPath, []byte(chYAML), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.LoadChannel(chPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	st, err := store.Open(filepath.Join(work, "messages.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	scripts := script.New(script.Options{Log: slog.New(slog.DiscardHandler)})
-	defer scripts.Close()
-
-	eng := New(Options{Store: st, Scripts: scripts, Log: slog.New(slog.DiscardHandler)})
-	if err := eng.LoadChannel(cfg); err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	if err := eng.Start(ctx, "mllp-feed"); err != nil {
-		t.Fatal(err)
-	}
-	defer eng.Shutdown()
-
-	// Reach into the running channel for the bound port.
-	ch, _ := eng.Channel("mllp-feed")
-	listener, ok := ch.Source.(*mllp.Listener)
-	if !ok {
-		t.Fatal("source is not an MLLP listener")
-	}
-	sender, err := mllp.NewSender(map[string]any{"addr": listener.Addr(), "ackTimeout": "10s"})
+      settings: {dir: `+outDir+`, pattern: "{id}.hl7"}
+`)
+	sender, err := mllp.NewSender(map[string]any{"addr": testutil.ListenAddr(t, ch), "ackTimeout": "10s"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,11 +77,11 @@ destinations:
 
 	// Both messages recorded: one TRANSFORMED with a SENT destination, one
 	// ERROR in the Invalid Message Channel.
-	list, err := st.ListMessages(ctx, "mllp-feed", store.ListQuery{})
+	list, err := f.Store.ListMessages(ctx, "mllp-feed", store.ListQuery{})
 	if err != nil || len(list) != 2 {
 		t.Fatalf("stored messages = %d, %v", len(list), err)
 	}
-	counts, _ := st.MessageCounts(ctx, "mllp-feed")
+	counts, _ := f.Store.MessageCounts(ctx, "mllp-feed")
 	if counts["ERROR"] != 1 || counts["SENT"] != 1 {
 		t.Errorf("counts = %v", counts)
 	}

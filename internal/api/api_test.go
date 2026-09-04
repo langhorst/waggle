@@ -21,6 +21,7 @@ import (
 	"github.com/langhorst/waggle/internal/message"
 	"github.com/langhorst/waggle/internal/script"
 	"github.com/langhorst/waggle/internal/store"
+	"github.com/langhorst/waggle/internal/testutil"
 
 	_ "github.com/langhorst/waggle/internal/adapter/file"
 	_ "github.com/langhorst/waggle/internal/format/csvfmt"
@@ -44,25 +45,18 @@ type harness struct {
 // (HL7 in from files, transformed, CSV out to files), and the HTTP server.
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	work := t.TempDir()
+	f := testutil.NewFixture(t)
+	work := f.Work
 	inDir := filepath.Join(work, "in")
 	outDir := filepath.Join(work, "out")
 	channelsDir := filepath.Join(work, "channels")
 	scriptsDir := filepath.Join(channelsDir, "scripts")
-	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.MkdirAll(inDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeFile := func(path, content string) {
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	writeFile(filepath.Join(scriptsDir, "upper.js"),
+	testutil.WriteFile(t, filepath.Join(scriptsDir, "upper.js"),
 		`function transform(msg) { msg.set('PID-5.1', msg.get('PID-5.1').toUpperCase()); }`)
-	writeFile(filepath.Join(channelsDir, "feed.yaml"), `
+	testutil.WriteFile(t, filepath.Join(channelsDir, "feed.yaml"), `
 id: feed
 source:
   type: file-reader
@@ -76,40 +70,31 @@ destinations:
       settings: {dir: `+outDir+`, pattern: "{id}.hl7"}
     queue: {retryInterval: 10ms}
 `)
-
-	st, err := store.Open(filepath.Join(work, "messages.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
-	scripts := script.New(script.Options{Log: slog.New(slog.DiscardHandler)})
-	t.Cleanup(scripts.Close)
-
-	eng := engine.New(engine.Options{Store: st, Scripts: scripts, Log: slog.New(slog.DiscardHandler)})
+	// The channel is loaded the way the daemon loads it (the whole
+	// directory) so ScriptsRoot confinement sees realistic paths.
 	channels, err := config.LoadChannels(channelsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, ch := range channels {
-		if err := eng.LoadChannel(ch); err != nil {
+		if err := f.Eng.LoadChannel(ch); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := eng.Start(context.Background(), "feed"); err != nil {
+	if err := f.Eng.Start(context.Background(), "feed"); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(eng.Shutdown)
 
 	srv := &Server{
-		Eng:         eng,
-		Scripts:     scripts,
+		Eng:         f.Eng,
+		Scripts:     f.Scripts,
 		ScriptsRoot: channelsDir,
 		Auth:        AuthConfig{Token: testToken},
 		Log:         slog.New(slog.DiscardHandler),
 	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return &harness{t: t, ts: ts, srv: srv, eng: eng, st: st, work: work, inDir: inDir, scripts: scripts}
+	return &harness{t: t, ts: ts, srv: srv, eng: f.Eng, st: f.Store, work: work, inDir: inDir, scripts: f.Scripts}
 }
 
 func (h *harness) do(method, path string, body string) (int, []byte) {
@@ -151,19 +136,20 @@ func (h *harness) feedMessage(content string) int64 {
 	if err := os.WriteFile(filepath.Join(h.inDir, name), []byte(content), 0o644); err != nil {
 		h.t.Fatal(err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	var id int64
+	testutil.Eventually(h.t, "new message SENT", func() bool {
 		list, err := h.st.ListMessages(context.Background(), "feed", store.ListQuery{Limit: 1})
-		if err == nil && len(list) > 0 && list[0].ID > baseline {
-			d, err := h.st.GetMessage(context.Background(), list[0].ID)
-			if err == nil && len(d.Destinations) > 0 && d.Destinations[0].State == message.StateSent {
-				return d.ID
-			}
+		if err != nil || len(list) == 0 || list[0].ID <= baseline {
+			return false
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	h.t.Fatal("message never reached SENT")
-	return 0
+		d, err := h.st.GetMessage(context.Background(), list[0].ID)
+		if err == nil && len(d.Destinations) > 0 && d.Destinations[0].State == message.StateSent {
+			id = d.ID
+			return true
+		}
+		return false
+	})
+	return id
 }
 
 func TestStatusAndChannels(t *testing.T) {

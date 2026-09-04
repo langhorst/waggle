@@ -15,7 +15,7 @@ destinations:
     adapter:
       type: mllp-sender
       settings:
-        addr: "127.0.0.1:6661"
+        addr: "127.0.0.1:6663"   # mllp-to-astm.yaml's listener (the HIS side of the bridge)
     queue:
       maxAttempts: 10
       retryInterval: 1s
