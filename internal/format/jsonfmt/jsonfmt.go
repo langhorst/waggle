@@ -16,6 +16,7 @@ package jsonfmt
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -47,7 +48,7 @@ func (DataType) Parse(raw []byte) (*message.Node, error) {
 	dec.UseNumber()
 	root := &message.Node{Name: "json"}
 	if err := decodeValue(dec, root); err != nil {
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("json: empty message")
 		}
 		return nil, fmt.Errorf("json: %w", err)

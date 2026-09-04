@@ -55,7 +55,7 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 
 	s := &Store{db: db, retention: map[string]int{}}
-	if err := s.migrate(); err != nil {
+	if err := s.migrate(context.Background()); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -76,8 +76,8 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-func (s *Store) migrate() error {
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)`); err != nil {
+func (s *Store) migrate(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)`); err != nil {
 		return fmt.Errorf("store: migrations table: %w", err)
 	}
 	entries, err := fs.Glob(migrations, "migrations/*.sql")
@@ -87,7 +87,7 @@ func (s *Store) migrate() error {
 	sort.Strings(entries)
 	for _, name := range entries {
 		var applied int
-		if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, name).Scan(&applied); err != nil {
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, name).Scan(&applied); err != nil {
 			return fmt.Errorf("store: %w", err)
 		}
 		if applied > 0 {
@@ -97,15 +97,15 @@ func (s *Store) migrate() error {
 		if err != nil {
 			return err
 		}
-		tx, err := s.db.Begin()
+		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(string(raw)); err != nil {
+		if _, err := tx.ExecContext(ctx, string(raw)); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("store: applying %s: %w", name, err)
 		}
-		if _, err := tx.Exec(`INSERT INTO schema_migrations (name) VALUES (?)`, name); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (name) VALUES (?)`, name); err != nil {
 			tx.Rollback()
 			return err
 		}

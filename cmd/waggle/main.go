@@ -173,7 +173,11 @@ func runDaemon(args []string) int {
 		ScriptsRoot: cfg.ChannelsDir,
 		Log:         log,
 	}
-	httpServer := &http.Server{Addr: cfg.Listen, Handler: apiServer.Handler()}
+	httpServer := &http.Server{
+		Addr:              cfg.Listen,
+		Handler:           apiServer.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	go func() {
 		log.Info("http api listening", "addr", cfg.Listen)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {

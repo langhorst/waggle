@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -79,7 +80,7 @@ func TestRecordAndGet(t *testing.T) {
 		t.Errorf("payload = %q, %v", payload, err)
 	}
 
-	if _, err := s.GetMessage(ctx, 99999); err != ErrNotFound {
+	if _, err := s.GetMessage(ctx, 99999); !errors.Is(err, ErrNotFound) {
 		t.Errorf("missing message: %v", err)
 	}
 }

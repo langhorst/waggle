@@ -100,7 +100,7 @@ func (l *Listener) Addr() string {
 }
 
 func (l *Listener) Start(ctx context.Context, deliver adapter.DeliverFunc) error {
-	ln, err := net.Listen("tcp", l.cfg.Addr)
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", l.cfg.Addr)
 	if err != nil {
 		return fmt.Errorf("mllp-listener: %w", err)
 	}

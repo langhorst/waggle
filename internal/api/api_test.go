@@ -392,7 +392,12 @@ func TestSSEStream(t *testing.T) {
 		t.Fatalf("content-type = %q", ct)
 	}
 
-	go h.feedMessage(sampleHL7)
+	// Drop the file directly rather than via feedMessage: that helper
+	// calls t.Fatal, which must not run on a non-test goroutine.
+	name := fmt.Sprintf("m-%d.hl7", time.Now().UnixNano())
+	if err := os.WriteFile(filepath.Join(h.inDir, name), []byte(sampleHL7), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	var sawMessageEvent bool

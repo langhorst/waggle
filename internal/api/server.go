@@ -190,7 +190,7 @@ type messagePayload struct {
 }
 
 func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
+	id, err := pathID(r)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
@@ -213,7 +213,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
+	id, err := pathID(r)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
@@ -232,7 +232,7 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
+	id, err := pathID(r)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
@@ -253,7 +253,7 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
+	id, err := pathID(r)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
@@ -292,7 +292,7 @@ func (s *Server) handleDLQ(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
+	id, err := pathID(r)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
@@ -426,10 +426,10 @@ func (s *Server) handleScriptWrite(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
 
-func pathID(r *http.Request, key string) (int64, error) {
-	id, err := strconv.ParseInt(r.PathValue(key), 10, 64)
+func pathID(r *http.Request) (int64, error) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id <= 0 {
-		return 0, fmt.Errorf("invalid message id %q", r.PathValue(key))
+		return 0, fmt.Errorf("invalid message id %q", r.PathValue("id"))
 	}
 	return id, nil
 }

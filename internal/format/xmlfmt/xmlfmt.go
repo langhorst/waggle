@@ -22,6 +22,7 @@ package xmlfmt
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -75,7 +76,7 @@ func (DataType) Parse(raw []byte) (*message.Node, error) {
 	sawElement := false
 	for {
 		tok, err := p.dec.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

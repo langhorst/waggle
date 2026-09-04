@@ -345,9 +345,8 @@ func TestSenderBusyReceiver(t *testing.T) {
 					continue
 				}
 				conn.Write([]byte{ack})
-				if f.Last {
-					// keep reading until EOT
-				}
+				// After the last frame keep reading until EOT.
+				_ = f.Last
 			case eot:
 				return
 			}

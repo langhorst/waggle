@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"fmt"
@@ -25,37 +26,42 @@ var staticFS embed.FS
 // Vendored frontend assets (fully offline): htmx 1.9.12, Flowbite 2.5.2,
 // and the Tailwind browser runtime that Flowbite's utility classes need.
 
+// badgeTmpl renders a state/status pill; going through html/template keeps
+// the label contextually escaped even if it ever stops being a constant.
+var badgeTmpl = template.Must(template.New("badge").Parse(
+	`<span class="text-xs font-medium me-2 px-2.5 py-0.5 rounded {{.Class}}">{{.Label}}</span>`))
+
+var (
+	stateBadgeClasses = map[string]string{
+		string(message.StateReceived):    "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300",
+		string(message.StateTransformed): "bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-300",
+		string(message.StateQueued):      "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300",
+		string(message.StateSent):        "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300",
+		string(message.StateError):       "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300",
+		string(message.StateFiltered):    "bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300",
+	}
+	statusBadgeClasses = map[string]string{
+		"STARTED": "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300",
+		"PAUSED":  "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300",
+		"STOPPED": "bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300",
+	}
+)
+
+func badge(classes map[string]string, label string) template.HTML {
+	c, ok := classes[label]
+	if !ok {
+		c = "bg-gray-100 text-gray-800"
+	}
+	var buf bytes.Buffer
+	if err := badgeTmpl.Execute(&buf, struct{ Class, Label string }{c, label}); err != nil {
+		return template.HTML(template.HTMLEscapeString(label)) //nolint:gosec // escaped just above
+	}
+	return template.HTML(buf.String()) //nolint:gosec // rendered by html/template
+}
+
 var templateFuncs = template.FuncMap{
-	"stateBadge": func(s message.State) template.HTML {
-		classes := map[message.State]string{
-			message.StateReceived:    "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300",
-			message.StateTransformed: "bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-300",
-			message.StateQueued:      "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300",
-			message.StateSent:        "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300",
-			message.StateError:       "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300",
-			message.StateFiltered:    "bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300",
-		}
-		c, ok := classes[s]
-		if !ok {
-			c = "bg-gray-100 text-gray-800"
-		}
-		return template.HTML(fmt.Sprintf(
-			`<span class="text-xs font-medium me-2 px-2.5 py-0.5 rounded %s">%s</span>`, c, s))
-	},
-	"statusBadge": func(s any) template.HTML {
-		classes := map[string]string{
-			"STARTED": "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300",
-			"PAUSED":  "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300",
-			"STOPPED": "bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300",
-		}
-		str := fmt.Sprint(s)
-		c, ok := classes[str]
-		if !ok {
-			c = "bg-gray-100 text-gray-800"
-		}
-		return template.HTML(fmt.Sprintf(
-			`<span class="text-xs font-medium me-2 px-2.5 py-0.5 rounded %s">%s</span>`, c, str))
-	},
+	"stateBadge":  func(s message.State) template.HTML { return badge(stateBadgeClasses, string(s)) },
+	"statusBadge": func(s any) template.HTML { return badge(statusBadgeClasses, fmt.Sprint(s)) },
 	"timefmt": func(t time.Time) string {
 		if t.IsZero() {
 			return ""
@@ -189,12 +195,6 @@ func (s *Server) actionChannel(w http.ResponseWriter, r *http.Request) {
 	s.partialChannels(w, r)
 }
 
-type messagesQuery struct {
-	ChannelID string
-	State     string
-	BeforeID  int64
-}
-
 func (s *Server) pageChannel(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if _, ok := s.Eng.Channel(id); !ok {
@@ -226,7 +226,7 @@ func (s *Server) partialMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) pageMessage(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
+	id, err := pathID(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -258,7 +258,7 @@ func (s *Server) pageMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) actionReplay(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
+	id, err := pathID(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -278,7 +278,7 @@ func (s *Server) actionReplay(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) partialTree(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
+	id, err := pathID(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -293,7 +293,7 @@ func (s *Server) partialTree(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) partialDiff(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
+	id, err := pathID(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -307,7 +307,7 @@ func (s *Server) partialDiff(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) partialDestinations(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
+	id, err := pathID(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -345,7 +345,7 @@ func (s *Server) partialDLQ(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) actionRequeue(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
+	id, err := pathID(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

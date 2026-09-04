@@ -26,6 +26,7 @@ package astm1381
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -146,7 +147,7 @@ func readFrameAfter(first byte, r *bufio.Reader, maxText int) (frame, error) {
 }
 
 func unexpectedEOF(err error) error {
-	if err == io.EOF {
+	if errors.Is(err, io.EOF) {
 		return io.ErrUnexpectedEOF
 	}
 	return err

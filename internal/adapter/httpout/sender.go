@@ -93,7 +93,7 @@ func NewSender(settings map[string]any) (*Sender, error) {
 		if !pool.AppendCertsFromPEM(pemBytes) {
 			return nil, fmt.Errorf("http-sender: caFile %s contains no certificates", cfg.CAFile)
 		}
-		transport.TLSClientConfig = &tls.Config{RootCAs: pool}
+		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
 	return &Sender{
 		cfg:  cfg,
@@ -117,7 +117,7 @@ func (s *Sender) Send(ctx context.Context, payload []byte, meta map[string]strin
 		ref, err := url.Parse(p)
 		if err != nil {
 			// A script wrote an unparseable path; retrying cannot fix it.
-			return adapter.Permanent(fmt.Errorf("http-sender: invalid %s %q: %v", MetaPath, p, err))
+			return adapter.Permanent(fmt.Errorf("http-sender: invalid %s %q: %w", MetaPath, p, err))
 		}
 		target = s.base.ResolveReference(ref)
 	}
@@ -128,7 +128,7 @@ func (s *Sender) Send(ctx context.Context, payload []byte, meta map[string]strin
 
 	req, err := http.NewRequestWithContext(ctx, method, target.String(), bytes.NewReader(payload))
 	if err != nil {
-		return adapter.Permanent(fmt.Errorf("http-sender: %v", err))
+		return adapter.Permanent(fmt.Errorf("http-sender: %w", err))
 	}
 	req.Header.Set("Content-Type", s.cfg.ContentType)
 	for k, v := range s.cfg.Headers {
