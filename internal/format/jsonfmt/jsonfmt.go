@@ -264,19 +264,14 @@ func lookupKey(n *message.Node, key string) []*message.Node {
 	return out
 }
 
-func (d DataType) Set(root *message.Node, pathExpr, value string) error {
-	return d.SetTyped(root, pathExpr, value)
-}
-
-// SetTyped implements format.TypedSetter: values set from scripts keep their
-// dynamic type (JS numbers stay JSON numbers). Intermediate structure is
-// autovivified — objects for key segments, arrays (null-padded) for index
-// segments; a scalar or empty container in the way is converted to the
-// needed container. A populated container is never silently replaced: a key
-// step on a non-empty array descends into element 0 (get on the same path
-// reads element 0 first), and an index step on a non-empty object is an
-// error.
-func (DataType) SetTyped(root *message.Node, pathExpr string, value any) error {
+// Set implements format.DataType: values keep their dynamic type (JS
+// numbers stay JSON numbers). Intermediate structure is autovivified:
+// objects for key segments, arrays (null-padded) for index segments; a
+// scalar or empty container in the way is converted to the needed
+// container. A populated container is never silently replaced: a key step
+// on a non-empty array descends into element 0 (get on the same path reads
+// element 0 first), and an index step on a non-empty object is an error.
+func (DataType) Set(root *message.Node, pathExpr string, value any) error {
 	segs, err := parsePath(pathExpr)
 	if err != nil {
 		return err
@@ -372,6 +367,17 @@ func (DataType) Segments(root *message.Node, name string) []*message.Node {
 		}
 	}
 	return out
+}
+
+// ResolveFrom implements format.DataType: rel is a path evaluated with the
+// segment (an object or array element) as its root.
+func (d DataType) ResolveFrom(root, seg *message.Node, rel string) ([]*message.Node, error) {
+	return d.Resolve(seg, rel)
+}
+
+// SetFrom implements format.DataType.
+func (d DataType) SetFrom(root, seg *message.Node, rel string, value any) error {
+	return d.Set(seg, rel, value)
 }
 
 // Value renders a leaf as its text (null renders empty) and a container as

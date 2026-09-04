@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/langhorst/waggle/internal/format"
 	"github.com/langhorst/waggle/internal/message"
 )
 
@@ -265,19 +266,52 @@ func (f *Format) Resolve(root *message.Node, path string) ([]*message.Node, erro
 // Set implements format.DataType. Values are split on the separators below
 // the addressed level (see Set); the header's delimiter fields are single
 // raw values and reject paths below field level.
-func (f *Format) Set(root *message.Node, path, value string) error {
+func (f *Format) Set(root *message.Node, path string, value any) error {
 	p, err := f.ParsePath(path)
 	if err != nil {
 		return err
 	}
+	return f.set(root, root, p, path, format.String(value))
+}
+
+// set writes into target (root itself, or a single-segment scope) using the
+// delimiters recorded in root.
+func (f *Format) set(root, target *message.Node, p Path, path, value string) error {
 	if p.Field <= f.spec.HeaderRaw(p.Seg) {
 		if p.Comp != 0 || p.Sub != 0 {
 			return fmt.Errorf("%s: path %s: %s-%d holds a delimiter and has no components", f.spec.Name, path, p.Seg, p.Field)
 		}
-		return Set(root, p, value, nil)
+		return Set(target, p, value, nil)
 	}
 	dl := f.Delims(root)
-	return Set(root, p, value, &dl)
+	return Set(target, p, value, &dl)
+}
+
+// ResolveFrom implements format.DataType: rel is "field[rep].comp.sub"
+// evaluated against seg alone.
+func (f *Format) ResolveFrom(root, seg *message.Node, rel string) ([]*message.Node, error) {
+	p, err := f.ParsePath(seg.Name + "-" + rel)
+	if err != nil {
+		return nil, fmt.Errorf("%s: segment-relative path %q: %w", f.spec.Name, rel, err)
+	}
+	p.SegOcc = 0
+	return Resolve(scope(root, seg), p), nil
+}
+
+// SetFrom implements format.DataType.
+func (f *Format) SetFrom(root, seg *message.Node, rel string, value any) error {
+	p, err := f.ParsePath(seg.Name + "-" + rel)
+	if err != nil {
+		return fmt.Errorf("%s: segment-relative path %q: %w", f.spec.Name, rel, err)
+	}
+	p.SegOcc = 1
+	return f.set(root, scope(root, seg), p, rel, format.String(value))
+}
+
+// scope is a root holding exactly one segment; since it shares the node,
+// writes through it land in the real tree.
+func scope(root, seg *message.Node) *message.Node {
+	return &message.Node{Name: root.Name, Children: []*message.Node{seg}}
 }
 
 // Segments implements format.DataType.

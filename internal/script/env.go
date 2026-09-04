@@ -102,29 +102,22 @@ func (e *env) wrapMsg(sm *scriptMsg, handle int) map[string]any {
 	return obj
 }
 
-// wrapSegment exposes one segment/record/row with segment-relative paths:
-// seg.get('5.2') on a PID handle resolves PID-5.2 against just that
-// occurrence.
+// wrapSegment exposes one segment/record/row/element with segment-relative
+// paths: seg.get('5.2') on a PID handle resolves PID-5.2 against just that
+// occurrence, row.get('3') a CSV column, el.get('id/@value') an XML child,
+// obj.get('family') a JSON key. Each format defines the relative dialect.
 func (e *env) wrapSegment(sm *scriptMsg, seg *message.Node) map[string]any {
-	// A single-segment root lets the format dialect resolve relative paths
-	// against exactly this occurrence; the shared node pointer means sets
-	// mutate the real tree.
-	scoped := &message.Node{Name: sm.tree().Name, Children: []*message.Node{seg}}
-	join := func(segName, rel string) string { return segName + "-" + rel }
-	if j, ok := sm.dt.(format.SegmentJoiner); ok {
-		join = j.JoinSegmentPath
-	}
 	return map[string]any{
 		"name": seg.Name,
 		"get": func(rel string) (any, error) {
-			nodes, err := sm.dt.Resolve(scoped, join(seg.Name, rel))
+			nodes, err := sm.dt.ResolveFrom(sm.tree(), seg, rel)
 			if err != nil || len(nodes) == 0 {
 				return nil, err
 			}
 			return sm.dt.Value(sm.tree(), nodes[0]), nil
 		},
 		"set": func(rel string, value goja.Value) error {
-			return setValue(sm.dt, scoped, join(seg.Name, rel), value)
+			return sm.dt.SetFrom(sm.tree(), seg, rel, jsScalar(value))
 		},
 		"value": func() string {
 			return sm.dt.Value(sm.tree(), seg)
@@ -224,20 +217,16 @@ func (e *env) syncMeta() {
 	e.m.Meta = meta
 }
 
-// setValue writes a script-provided value at path. Formats that distinguish
-// value types (format.TypedSetter — JSON) receive the native JS type so
-// numbers and booleans stay typed on the wire; everything else gets the JS
-// string conversion.
+// setValue writes a script-provided value at path. The format decides what
+// to do with the type: JSON keeps numbers and booleans typed on the wire,
+// text formats store the string form.
 func setValue(dt format.DataType, root *message.Node, path string, v goja.Value) error {
-	if ts, ok := dt.(format.TypedSetter); ok {
-		return ts.SetTyped(root, path, jsScalar(v))
-	}
-	return dt.Set(root, path, jsString(v))
+	return dt.Set(root, path, jsScalar(v))
 }
 
-// jsScalar exports a JS value as a Go scalar for a TypedSetter:
-// null/undefined → nil, primitives keep their type, anything else falls back
-// to JS string conversion.
+// jsScalar exports a JS value as a Go scalar: null/undefined become nil,
+// primitives keep their type, anything else falls back to JS string
+// conversion.
 func jsScalar(v goja.Value) any {
 	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
 		return nil
@@ -248,13 +237,4 @@ func jsScalar(v goja.Value) any {
 	default:
 		return v.String()
 	}
-}
-
-// jsString renders a JS value for storage in the tree: null/undefined
-// become empty, everything else uses JS string conversion.
-func jsString(v goja.Value) string {
-	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
-		return ""
-	}
-	return v.String()
 }

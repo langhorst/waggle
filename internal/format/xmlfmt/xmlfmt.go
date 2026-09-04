@@ -44,16 +44,27 @@ const (
 
 func init() { format.Register(DataType{}) }
 
-// DataType implements format.DataType (and format.SegmentJoiner) for XML.
+// DataType implements format.DataType for XML.
 type DataType struct{}
 
 func (DataType) Name() string { return "xml" }
 
-// JoinSegmentPath implements format.SegmentJoiner: segment-relative script
-// paths join with the dialect's step separator (seg.get('id/@value') on an
-// "entry" handle resolves entry/id/@value against that occurrence).
-func (DataType) JoinSegmentPath(segName, rel string) string {
-	return segName + "/" + rel
+// ResolveFrom implements format.DataType: rel is a path of steps below the
+// element (el.get('id/@value') on an "entry" handle resolves
+// entry/id/@value against exactly that occurrence).
+func (d DataType) ResolveFrom(root, el *message.Node, rel string) ([]*message.Node, error) {
+	return d.Resolve(scope(root, el), el.Name+"/"+rel)
+}
+
+// SetFrom implements format.DataType.
+func (d DataType) SetFrom(root, el *message.Node, rel string, value any) error {
+	return d.Set(scope(root, el), el.Name+"/"+rel, value)
+}
+
+// scope is a root holding exactly one element; it shares the node, so
+// writes through it land in the real tree.
+func scope(root, el *message.Node) *message.Node {
+	return &message.Node{Name: root.Name, Children: []*message.Node{el}}
 }
 
 // ---- parse ----
@@ -505,7 +516,8 @@ func matchChildren(n *message.Node, s step) []*message.Node {
 	return out
 }
 
-func (DataType) Set(root *message.Node, pathExpr, value string) error {
+func (DataType) Set(root *message.Node, pathExpr string, v any) error {
+	value := format.String(v)
 	steps, err := parsePath(pathExpr)
 	if err != nil {
 		return err

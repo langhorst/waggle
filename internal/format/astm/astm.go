@@ -55,15 +55,12 @@ func headerRawFields(name string) int {
 	return 0
 }
 
-// DataType implements format.DataType for ASTM E1394 by delegating to Format.
+// DataType implements format.DataType by delegating to Format.
 type DataType struct{}
 
-func (DataType) Name() string                                 { return Format.Name() }
-func (DataType) Parse(raw []byte) (*message.Node, error)      { return Format.Parse(raw) }
-func (DataType) Serialize(root *message.Node) ([]byte, error) { return Format.Serialize(root) }
-func (DataType) Set(root *message.Node, path, value string) error {
-	return Format.Set(root, path, value)
-}
+func (DataType) Name() string                                   { return Format.Name() }
+func (DataType) Parse(raw []byte) (*message.Node, error)        { return Format.Parse(raw) }
+func (DataType) Serialize(root *message.Node) ([]byte, error)   { return Format.Serialize(root) }
 func (DataType) Value(root, n *message.Node) string             { return Format.Value(root, n) }
 func (DataType) Flatten(root *message.Node) []message.PathValue { return Format.Flatten(root) }
 
@@ -71,6 +68,18 @@ func (DataType) Resolve(root *message.Node, path string) ([]*message.Node, error
 	return Format.Resolve(root, path)
 }
 
+func (DataType) Set(root *message.Node, path string, value any) error {
+	return Format.Set(root, path, value)
+}
+
 func (DataType) Segments(root *message.Node, name string) []*message.Node {
 	return Format.Segments(root, name)
+}
+
+func (DataType) ResolveFrom(root, seg *message.Node, rel string) ([]*message.Node, error) {
+	return Format.ResolveFrom(root, seg, rel)
+}
+
+func (DataType) SetFrom(root, seg *message.Node, rel string, value any) error {
+	return Format.SetFrom(root, seg, rel, value)
 }

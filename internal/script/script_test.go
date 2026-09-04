@@ -16,6 +16,7 @@ import (
 	_ "github.com/langhorst/waggle/internal/format/csvfmt"
 	_ "github.com/langhorst/waggle/internal/format/hl7v2"
 	_ "github.com/langhorst/waggle/internal/format/jsonfmt"
+	_ "github.com/langhorst/waggle/internal/format/xmlfmt"
 )
 
 const sampleHL7 = "MSH|^~\\&|SEND|SFAC|RECV|RFAC|20260730||ADT^A01|CTRL001|P|2.5\r" +
@@ -428,5 +429,80 @@ function transform(msg) {
 	want := `{"name":"DOE","weight":70,"active":true,"note":null}`
 	if string(out) != want {
 		t.Errorf("serialized:\n got  %s\n want %s", out, want)
+	}
+}
+
+// TestSegmentHandlesAcrossFormats: msg.segments handles resolve relative
+// paths in each format's own dialect. The old HL7-shaped default join made
+// row.get('3') an error for CSV and obj.get('family') silently empty for
+// JSON.
+func TestSegmentHandlesAcrossFormats(t *testing.T) {
+	e := newTestEngine(t, Options{})
+	cases := []struct {
+		dataType, raw, script, want string
+	}{
+		{
+			"csv", "a,b,c\nd,e,f\n",
+			`function transform(msg) {
+				var rows = msg.segments('R');
+				rows[1].set('3', rows[0].get('2') + rows[1].get('3'));
+				rows[0].set('4', 'x');
+			}`,
+			"a,b,c,x\nd,e,bf\n",
+		},
+		{
+			"json", `{"name":[{"family":"Doe","given":["J"]},{"family":"Roe"}],"active":true}`,
+			`function transform(msg) {
+				var names = msg.segments('name');
+				names[1].set('family', names[0].get('family') + '-' + names[1].get('family'));
+				names[0].set('given[1]', 'Q');
+				names[0].set('count', names.length);
+			}`,
+			`{"name":[{"family":"Doe","given":["J","Q"],"count":2},{"family":"Doe-Roe"}],"active":true}`,
+		},
+		{
+			"xml", `<Bundle><entry><id value="1"/></entry><entry><id value="2"/></entry></Bundle>`,
+			`function transform(msg) {
+				var entries = msg.segments('entry');
+				entries[1].set('id/@value', entries[0].get('id/@value') + entries[1].get('id/@value'));
+				entries[0].set('note', 'first');
+			}`,
+			`<Bundle><entry><id value="1"/><note>first</note></entry><entry><id value="12"/></entry></Bundle>`,
+		},
+		{
+			"hl7v2", sampleHL7,
+			`function transform(msg) {
+				var obx = msg.segments('OBX');
+				obx[1].set('5', obx[0].get('5') + '/' + obx[1].get('5'));
+			}`,
+			"MSH|^~\\&|SEND|SFAC|RECV|RFAC|20260730||ADT^A01|CTRL001|P|2.5\rPID|1||MRN1~MRN2||DOE^JOHN\rOBX|1|NM|WT||70|kg\rOBX|2|NM|HT||70/180|cm\r",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.dataType, func(t *testing.T) {
+			dt, ok := format.Get(tc.dataType)
+			if !ok {
+				t.Fatalf("format %s not registered", tc.dataType)
+			}
+			tree, err := dt.Parse([]byte(tc.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := &message.Message{ID: 1, ChannelID: "t", Raw: []byte(tc.raw), Tree: tree, DataType: tc.dataType}
+			tr, err := e.CompileTranslator(writeScript(t, tc.script))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tr(m); err != nil {
+				t.Fatal(err)
+			}
+			out, err := dt.Serialize(m.Tree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(out) != tc.want {
+				t.Errorf("got  %q\nwant %q", out, tc.want)
+			}
+		})
 	}
 }

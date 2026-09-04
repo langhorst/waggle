@@ -359,9 +359,19 @@ func TestSegments(t *testing.T) {
 	if got := dt.Segments(root, "nope"); len(got) != 0 {
 		t.Errorf("segments(nope) = %v", got)
 	}
-	// Segment-relative paths join with the dialect separator.
-	if p := dt.JoinSegmentPath("name", "family/@value"); p != "name/family/@value" {
-		t.Errorf("JoinSegmentPath = %q", p)
+	// Segment-relative paths resolve against exactly that occurrence.
+	nodes, err := dt.ResolveFrom(root, names[1], "family/@value")
+	if err != nil || len(nodes) != 1 || nodes[0].Value != "Smith" {
+		t.Errorf("ResolveFrom(name[2], family/@value) = %v, %v", nodes, err)
+	}
+	if err := dt.SetFrom(root, names[1], "family/@value", "Jones"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := dt.Resolve(root, "Patient/name[2]/family/@value"); len(got) != 1 || got[0].Value != "Jones" {
+		t.Errorf("SetFrom did not write into the real tree: %v", got)
+	}
+	if got, _ := dt.Resolve(root, "Patient/name[1]/family/@value"); len(got) != 1 || got[0].Value != "Doe" {
+		t.Errorf("SetFrom touched the wrong occurrence: %v", got)
 	}
 }
 
@@ -393,12 +403,13 @@ func TestRegistered(t *testing.T) {
 	if !ok || got.Name() != "xml" {
 		t.Fatal("xml not registered")
 	}
-	// XML has no typed leaves; sets go through the plain string path.
-	if _, ok := got.(format.TypedSetter); ok {
-		t.Fatal("xml should not implement TypedSetter")
+	// XML has no typed leaves: a Go bool is stored as its text.
+	root, _ := got.Parse([]byte(`<a/>`))
+	if err := got.Set(root, "a/flag", true); err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := got.(format.SegmentJoiner); !ok {
-		t.Fatal("xml should implement SegmentJoiner")
+	if out, _ := got.Serialize(root); string(out) != `<a><flag>true</flag></a>` {
+		t.Fatalf("Set through the interface = %s", out)
 	}
 }
 

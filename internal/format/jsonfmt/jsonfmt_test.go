@@ -220,7 +220,7 @@ func TestSetTypedAndAutovivify(t *testing.T) {
 		{"score", 1.5},
 	}
 	for _, s := range steps {
-		if err := dt.SetTyped(root, s.path, s.value); err != nil {
+		if err := dt.Set(root, s.path, s.value); err != nil {
 			t.Fatalf("SetTyped(%s): %v", s.path, err)
 		}
 	}
@@ -363,8 +363,13 @@ func TestRegistered(t *testing.T) {
 	if !ok || got.Name() != "json" {
 		t.Fatal("json not registered")
 	}
-	if _, ok := got.(format.TypedSetter); !ok {
-		t.Fatal("json does not implement TypedSetter")
+	// Typed values survive Set: a Go bool stays a JSON boolean.
+	root, _ := got.Parse([]byte(`{}`))
+	if err := got.Set(root, "flag", true); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := got.Serialize(root); string(out) != `{"flag":true}` {
+		t.Fatalf("typed Set through the interface = %s", out)
 	}
 }
 
