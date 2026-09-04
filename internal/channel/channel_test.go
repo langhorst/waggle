@@ -347,6 +347,79 @@ func TestLifecycle(t *testing.T) {
 	}
 }
 
+// blockingSource models a TCP listener whose Stop waits for its connection
+// goroutines, one of which is mid-delivery. Stop blocks until released.
+type blockingSource struct {
+	fakeSource
+	stopping chan struct{} // closed when Stop is first entered
+	release  chan struct{} // the first Stop returns once this is closed
+	once     sync.Once
+}
+
+func (s *blockingSource) Stop() error {
+	s.once.Do(func() {
+		close(s.stopping)
+		<-s.release
+	})
+	return s.fakeSource.Stop()
+}
+
+// TestPauseDoesNotDeadlockWithInFlightDelivery: a message that arrives
+// while Pause is waiting for the source to stop must still be accepted.
+// Holding the status mutex across Source.Stop made deliver block on it
+// while Stop waited for deliver, wedging the channel for good.
+func TestPauseDoesNotDeadlockWithInFlightDelivery(t *testing.T) {
+	rec := &recordingRecorder{}
+	out := &fakeOut{}
+	src := &blockingSource{stopping: make(chan struct{}), release: make(chan struct{})}
+	ch := &Channel{
+		ID: "test", InType: hl7Type(), Source: src,
+		Destinations: []*Destination{{ID: "d1", OutType: hl7Type(), Adapter: out}},
+		Recorder:     rec, Log: slog.New(slog.DiscardHandler),
+	}
+	if err := ch.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { ch.Stop() }()
+
+	pauseDone := make(chan error, 1)
+	go func() { pauseDone <- ch.Pause() }()
+	<-src.stopping // Pause is now inside Source.Stop
+
+	delivered := make(chan error, 1)
+	go func() {
+		_, err := src.deliver(context.Background(), []byte(sampleHL7), nil)
+		delivered <- err
+	}()
+	select {
+	case err := <-delivered:
+		if err != nil {
+			t.Fatalf("delivery during pause transition refused: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("deliver blocked while Pause held the channel mutex (deadlock)")
+	}
+
+	close(src.release)
+	select {
+	case err := <-pauseDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Pause never returned")
+	}
+	if ch.Status() != StatusPaused {
+		t.Errorf("status = %s", ch.Status())
+	}
+	if err := ch.Resume(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if ch.Status() != StatusStarted {
+		t.Errorf("status after resume = %s", ch.Status())
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

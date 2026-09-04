@@ -112,6 +112,13 @@ type Channel struct {
 	Bus   *events.Bus
 	Log   *slog.Logger
 
+	// lifecycleMu serializes Start/Pause/Resume/Stop. It is held across
+	// adapter calls; mu never is. Inbound adapters call deliver from their
+	// own goroutines and Stop implementations wait for those goroutines,
+	// so holding mu (which deliver needs) while calling Source.Stop would
+	// deadlock the moment a message arrived mid-transition.
+	lifecycleMu sync.Mutex
+	// mu guards status and runCancel only.
 	mu        sync.Mutex
 	status    Status
 	runCancel context.CancelFunc
@@ -133,10 +140,13 @@ func (c *Channel) Status() Status {
 
 // Start begins intake. Starting a paused channel resumes it.
 func (c *Channel) Start(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.status == StatusStarted {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	switch c.Status() {
+	case StatusStarted:
 		return nil
+	case StatusPaused:
+		return c.resumeLocked(ctx)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	for _, d := range c.Destinations {
@@ -149,42 +159,53 @@ func (c *Channel) Start(ctx context.Context) error {
 		cancel()
 		return fmt.Errorf("channel %s: source: %w", c.ID, err)
 	}
+	c.mu.Lock()
 	c.runCancel = cancel
 	c.setStatusLocked(StatusStarted)
+	c.mu.Unlock()
 	return nil
 }
 
-// Pause stops intake only.
+// Pause stops intake only. Messages the source hands over while the stop
+// is in progress are still accepted and processed: a transport that has
+// already read a frame needs to answer it.
 func (c *Channel) Pause() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.status != StatusStarted {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.Status() != StatusStarted {
 		return fmt.Errorf("channel %s: not started", c.ID)
 	}
 	if err := c.Source.Stop(); err != nil {
 		return err
 	}
-	c.setStatusLocked(StatusPaused)
+	c.setStatus(StatusPaused)
 	return nil
 }
 
 // Resume restarts intake on a paused channel.
 func (c *Channel) Resume(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.status != StatusPaused {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.Status() != StatusPaused {
 		return fmt.Errorf("channel %s: not paused", c.ID)
 	}
+	return c.resumeLocked(ctx)
+}
+
+func (c *Channel) resumeLocked(ctx context.Context) error {
 	if err := c.Source.Start(ctx, c.deliver); err != nil {
 		return err
 	}
-	c.setStatusLocked(StatusStarted)
+	c.setStatus(StatusStarted)
 	return nil
 }
 
 // Stop halts intake, waits for in-flight messages, and closes destination
 // adapters.
 func (c *Channel) Stop() error {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+
 	c.mu.Lock()
 	status := c.status
 	cancel := c.runCancel
@@ -203,10 +224,14 @@ func (c *Channel) Stop() error {
 			_ = d.Adapter.Close()
 		}
 	}
-	c.mu.Lock()
-	c.setStatusLocked(StatusStopped)
-	c.mu.Unlock()
+	c.setStatus(StatusStopped)
 	return nil
+}
+
+func (c *Channel) setStatus(s Status) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.setStatusLocked(s)
 }
 
 func (c *Channel) setStatusLocked(s Status) {
