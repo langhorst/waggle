@@ -170,7 +170,63 @@ func TestLoadDaemonDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Listen != ":8420" || cfg.ChannelsDir != "channels" {
+	if cfg.Listen != DefaultListen || cfg.ChannelsDir != "channels" {
 		t.Errorf("defaults = %+v", cfg)
+	}
+}
+
+func TestLoadDaemonAuthPolicy(t *testing.T) {
+	cases := map[string]struct {
+		yaml    string
+		wantErr string
+	}{
+		"loopback without auth":      {yaml: "listen: 127.0.0.1:9000\n"},
+		"localhost without auth":     {yaml: "listen: localhost:9000\n"},
+		"ipv6 loopback without auth": {yaml: "listen: \"[::1]:9000\"\n"},
+		"all interfaces without auth": {
+			yaml:    "listen: \":9000\"\n",
+			wantErr: "no auth is configured",
+		},
+		"public address without auth": {
+			yaml:    "listen: 0.0.0.0:9000\n",
+			wantErr: "no auth is configured",
+		},
+		"public address with token": {yaml: "listen: 0.0.0.0:9000\nauth: {token: secret}\n"},
+		"public address auth disabled": {
+			yaml: "listen: 0.0.0.0:9000\nauth: {disabled: true}\n",
+		},
+		"disabled together with token": {
+			yaml:    "auth: {disabled: true, token: x}\n",
+			wantErr: "disabled is set together with credentials",
+		},
+		"basic user without password": {
+			yaml:    "auth: {basicUser: ops}\n",
+			wantErr: "basicUser requires basicPassword",
+		},
+		"basic password without user": {
+			yaml:    "auth: {basicPassword: pw}\n",
+			wantErr: "basicPassword requires basicUser",
+		},
+		"empty listen falls back to default": {yaml: "listen: \"\"\n"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "daemon.yaml")
+			if err := os.WriteFile(path, []byte(tc.yaml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadDaemon(path)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("expected error containing %q, got config %+v", tc.wantErr, cfg)
+			case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
+				t.Fatalf("error %q does not contain %q", err, tc.wantErr)
+			}
+			if err == nil && cfg.Listen == "" {
+				t.Errorf("listen not defaulted: %+v", cfg)
+			}
+		})
 	}
 }

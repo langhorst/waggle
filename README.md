@@ -229,6 +229,15 @@ scripts are separate `.js` files referenced by path (relative to the
 channel file). Unknown keys are load-time errors. `retention: -1` keeps
 messages forever; queue-referenced messages are never pruned.
 
+**Auth.** The API and web UI are the full-control surface, so every route
+requires credentials: `auth.token` is accepted as `Authorization: Bearer`
+and as the basic-auth password with any user name (browsers prompt for
+it), and `auth.basicUser`/`auth.basicPassword` add a dedicated login.
+The daemon listens on `127.0.0.1:8420` by default and refuses to bind a
+non-loopback address without credentials unless `auth.disabled: true`.
+State-changing requests that carry a browser `Origin` or `Sec-Fetch-Site`
+header must be same-origin.
+
 ## Development
 
 ```sh

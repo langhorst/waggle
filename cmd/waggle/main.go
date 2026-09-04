@@ -171,7 +171,11 @@ func runDaemon(args []string) int {
 		Eng:         eng,
 		Scripts:     scripts,
 		ScriptsRoot: cfg.ChannelsDir,
+		Auth:        cfg.Auth,
 		Log:         log,
+	}
+	if cfg.Auth.Disabled {
+		log.Warn("http api authentication is disabled", "addr", cfg.Listen)
 	}
 	httpServer := &http.Server{
 		Addr:              cfg.Listen,

@@ -31,7 +31,9 @@ type Server struct {
 	// ScriptsRoot confines script file access: only files under this
 	// directory are readable/writable via the API.
 	ScriptsRoot string
-	Log         *slog.Logger
+	// Auth is the credential policy every route is checked against.
+	Auth AuthConfig
+	Log  *slog.Logger
 
 	started time.Time
 }
@@ -64,8 +66,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/channels/{id}/events", s.handleEvents)
 
 	s.registerWebUI(mux)
-	return mux
+	return s.protect(mux)
 }
+
+var (
+	errUnauthorized = errors.New("authentication required")
+	errCrossSite    = errors.New("cross-site request rejected")
+)
 
 func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

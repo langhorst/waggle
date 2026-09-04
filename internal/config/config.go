@@ -6,6 +6,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,20 +20,48 @@ import (
 
 // Daemon is the top-level daemon configuration.
 type Daemon struct {
-	// Listen is the HTTP API/web UI address, e.g. ":8420".
+	// Listen is the HTTP API/web UI address. Default "127.0.0.1:8420";
+	// binding a non-loopback address requires auth to be configured.
 	Listen string `yaml:"listen"`
 	// DataDir holds the SQLite database and other runtime state.
 	DataDir string `yaml:"dataDir"`
 	// ChannelsDir contains one YAML file per channel.
 	ChannelsDir string `yaml:"channelsDir"`
-	// HotReload enables watching channel configs and scripts for changes.
+	// HotReload enables watching channel scripts for changes. Channel
+	// YAML is reloaded on request (the reload action), not watched.
 	HotReload bool `yaml:"hotReload"`
+	// Auth protects the HTTP API and web UI.
+	Auth Auth `yaml:"auth"`
 }
+
+// Auth is the HTTP API/web UI credential policy. With no credentials
+// configured the daemon only agrees to listen on a loopback address; set
+// Disabled to opt out of that check explicitly.
+type Auth struct {
+	// Token is accepted as `Authorization: Bearer <token>` and as the
+	// password of HTTP basic auth with any user name (so a browser can use
+	// it for the web UI).
+	Token string `yaml:"token"`
+	// BasicUser/BasicPassword configure a dedicated basic-auth login.
+	BasicUser     string `yaml:"basicUser"`
+	BasicPassword string `yaml:"basicPassword"`
+	// Disabled turns authentication off entirely. Only appropriate behind
+	// a reverse proxy that authenticates, or on an isolated host.
+	Disabled bool `yaml:"disabled"`
+}
+
+// Enabled reports whether any credential is configured.
+func (a Auth) Enabled() bool {
+	return a.Token != "" || a.BasicUser != ""
+}
+
+// DefaultListen is the default HTTP API/web UI bind address.
+const DefaultListen = "127.0.0.1:8420"
 
 // DefaultDaemon returns the daemon config defaults.
 func DefaultDaemon() Daemon {
 	return Daemon{
-		Listen:      ":8420",
+		Listen:      DefaultListen,
 		DataDir:     "data",
 		ChannelsDir: "channels",
 		HotReload:   true,
@@ -52,16 +81,57 @@ func LoadDaemon(path string) (Daemon, error) {
 	if err := strictUnmarshal(raw, &cfg); err != nil {
 		return cfg, fmt.Errorf("config %s: %w", path, err)
 	}
-	if cfg.Listen == "" {
-		cfg.Listen = ":8420"
-	}
-	if cfg.DataDir == "" {
-		cfg.DataDir = "data"
-	}
-	if cfg.ChannelsDir == "" {
-		cfg.ChannelsDir = "channels"
+	cfg.applyDefaults()
+	if err := cfg.Validate(); err != nil {
+		return cfg, fmt.Errorf("config %s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+// applyDefaults fills in fields that were explicitly set to empty; a YAML
+// file with `listen: ""` should behave like one without the key.
+func (d *Daemon) applyDefaults() {
+	def := DefaultDaemon()
+	if d.Listen == "" {
+		d.Listen = def.Listen
+	}
+	if d.DataDir == "" {
+		d.DataDir = def.DataDir
+	}
+	if d.ChannelsDir == "" {
+		d.ChannelsDir = def.ChannelsDir
+	}
+}
+
+// Validate checks the daemon configuration for unsafe combinations.
+func (d *Daemon) Validate() error {
+	if d.Auth.Disabled && d.Auth.Enabled() {
+		return fmt.Errorf("auth: disabled is set together with credentials; remove one")
+	}
+	if d.Auth.BasicUser != "" && d.Auth.BasicPassword == "" {
+		return fmt.Errorf("auth: basicUser requires basicPassword")
+	}
+	if d.Auth.BasicPassword != "" && d.Auth.BasicUser == "" {
+		return fmt.Errorf("auth: basicPassword requires basicUser")
+	}
+	if !d.Auth.Enabled() && !d.Auth.Disabled && !isLoopback(d.Listen) {
+		return fmt.Errorf("listen %q is not a loopback address and no auth is configured: set auth.token (or auth.disabled: true to serve unauthenticated)", d.Listen)
+	}
+	return nil
+}
+
+// isLoopback reports whether addr binds only a loopback interface. An empty
+// host (":8420") binds every interface and is not loopback.
+func isLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Channel is one channel definition.

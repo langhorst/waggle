@@ -98,7 +98,13 @@ destinations:
 	}
 	t.Cleanup(eng.Shutdown)
 
-	srv := &Server{Eng: eng, Scripts: scripts, ScriptsRoot: channelsDir, Log: slog.New(slog.DiscardHandler)}
+	srv := &Server{
+		Eng:         eng,
+		Scripts:     scripts,
+		ScriptsRoot: channelsDir,
+		Auth:        AuthConfig{Token: testToken},
+		Log:         slog.New(slog.DiscardHandler),
+	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return &harness{t: t, ts: ts, eng: eng, st: st, work: work, inDir: inDir, scripts: scripts}
@@ -114,6 +120,7 @@ func (h *harness) do(method, path string, body string) (int, []byte) {
 	if err != nil {
 		h.t.Fatal(err)
 	}
+	req.Header.Set("Authorization", "Bearer "+testToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		h.t.Fatal(err)
@@ -383,6 +390,7 @@ func TestSSEStream(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "GET", h.ts.URL+"/api/channels/feed/events", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
