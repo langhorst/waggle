@@ -1,7 +1,6 @@
-// Command waggle is the self-contained integration engine
-// daemon. It hosts multiple channels defined by YAML files, exposes the
-// HTTP API and web UI (phase 6/7), and can alternatively run with the
-// embedded TUI observer attached (phase 5).
+// Command waggle is the self-contained integration engine daemon. It hosts
+// multiple channels defined by YAML files and exposes the HTTP API and web
+// UI; `waggle tui` attaches the terminal observer instead.
 //
 // Usage:
 //

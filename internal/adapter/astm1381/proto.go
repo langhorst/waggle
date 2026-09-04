@@ -32,7 +32,6 @@ import (
 
 // E1381 control bytes.
 const (
-	soh = 0x01 // unused, listed for completeness
 	stx = 0x02
 	etx = 0x03
 	eot = 0x04

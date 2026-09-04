@@ -28,7 +28,3 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 	*d = Duration(n)
 	return nil
 }
-
-func (d Duration) MarshalYAML() (any, error) {
-	return time.Duration(d).String(), nil
-}

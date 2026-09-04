@@ -3,8 +3,10 @@ package mllp
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -50,6 +52,7 @@ type ListenerConfig struct {
 // violation closes the connection.
 type Listener struct {
 	cfg ListenerConfig
+	log *slog.Logger
 
 	mu     sync.Mutex
 	ln     net.Listener
@@ -82,7 +85,7 @@ func NewListener(settings map[string]any) (*Listener, error) {
 	if cfg.MaxMessageSize <= 0 {
 		cfg.MaxMessageSize = 10 << 20
 	}
-	return &Listener{cfg: cfg}, nil
+	return &Listener{cfg: cfg, log: slog.Default()}, nil
 }
 
 // Addr returns the bound listen address (useful when configured with port
@@ -157,8 +160,10 @@ func (l *Listener) serve(ctx context.Context, conn net.Conn, deliver adapter.Del
 	for ctx.Err() == nil {
 		raw, err := readFrame(br, l.cfg.MaxMessageSize)
 		if err != nil {
-			if err != io.EOF {
-				// Framing violation or truncated frame: drop the connection.
+			// EOF is the peer hanging up; anything else is a framing
+			// violation or truncated frame. Either way, drop the connection.
+			if !errors.Is(err, io.EOF) && ctx.Err() == nil {
+				l.log.Warn("mllp-listener: dropping connection", "remote", conn.RemoteAddr(), "error", err)
 			}
 			return
 		}

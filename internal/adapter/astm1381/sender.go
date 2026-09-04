@@ -18,8 +18,9 @@ type SenderConfig struct {
 	// AckTimeout bounds each wait for ENQ/frame acknowledgment (the E1381
 	// sender timeout is 15s). Default 15s.
 	AckTimeout adapter.Duration `yaml:"ackTimeout"`
-	// MaxRetries is the per-frame retransmission budget on NAK. Default 6
-	// (the E1381 limit).
+	// MaxRetries is how many times one frame is sent before the session is
+	// aborted (initial transmission plus retransmissions on NAK). Default 6:
+	// E1381 aborts a frame rejected six times.
 	MaxRetries int `yaml:"maxRetries"`
 	// FrameSize is the maximum frame text length. Default 240 (the E1381
 	// maximum).

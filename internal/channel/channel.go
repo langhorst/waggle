@@ -56,8 +56,8 @@ type FilterFunc func(m *message.Message) (bool, error)
 type TranslateFunc func(m *message.Message) error
 
 // Recorder is the persistence seam: the pipeline reports every lifecycle
-// transition through it. Phase 2 runs with NewMemoryRecorder; the SQLite
-// store implements this in phase 3.
+// transition through it. The SQLite store is the production implementation;
+// NewMemoryRecorder serves tests and storeless runs.
 type Recorder interface {
 	// Record persists a freshly received message and assigns m.ID. Once it
 	// returns nil the engine owns the message (Guaranteed Delivery handoff).
@@ -351,8 +351,8 @@ func decisionForError(err error) adapter.AckDecision {
 }
 
 // sendTo runs one destination's chain: filter, translators, serialize,
-// deliver. Phase 2 delivers synchronously; the Guaranteed Delivery queue
-// replaces the direct send for non-waitForAck destinations in phase 3.
+// deliver. Non-waitForAck destinations hand off to the Guaranteed Delivery
+// queue when one is configured; everything else is sent inline.
 func (c *Channel) sendTo(ctx context.Context, d *Destination, m *message.Message) error {
 	dm := &message.Message{
 		ID:            m.ID,

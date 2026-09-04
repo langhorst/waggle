@@ -1,5 +1,5 @@
 // Package api is the daemon's HTTP surface: a JSON REST API plus SSE event
-// streams, shared by the web UI (phase 7) and any external client. This is
+// streams, shared by the embedded web UI and any external client. This is
 // the full-control interface — channel lifecycle, message inspection,
 // structural diffs, replay, DLQ requeue, and script editing.
 package api

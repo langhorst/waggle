@@ -339,10 +339,3 @@ func (m *Model) reloadDiff() {
 	}
 	m.diff, m.diffErr = diff, ""
 }
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}

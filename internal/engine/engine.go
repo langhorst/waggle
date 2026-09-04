@@ -20,9 +20,9 @@ import (
 	"github.com/langhorst/waggle/internal/store"
 )
 
-// ScriptEngine compiles referenced script files into pipeline steps. The
-// goja implementation arrives in phase 4; a nil ScriptEngine means script
-// references are rejected at load time rather than silently skipped.
+// ScriptEngine compiles referenced script files into pipeline steps
+// (internal/script is the goja implementation). A nil ScriptEngine means
+// script references are rejected at load time rather than silently skipped.
 type ScriptEngine interface {
 	CompileFilter(path string) (channel.FilterFunc, error)
 	CompileTranslator(path string) (channel.TranslateFunc, error)
