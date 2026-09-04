@@ -258,23 +258,40 @@ func LoadChannel(path string) (*Channel, error) {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
 	ch.Path = path
+	ch.Normalize()
 	if err := ch.Validate(); err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
 	return &ch, nil
 }
 
+// Normalize fills in the defaults that derive from other fields: the name
+// defaults to the id and a destination's data type to the source's.
+// LoadChannel calls it before Validate; a Channel built in code should too.
+func (c *Channel) Normalize() {
+	if c.Name == "" {
+		c.Name = c.ID
+	}
+	for i := range c.Destinations {
+		if c.Destinations[i].DataType == "" {
+			c.Destinations[i].DataType = c.Source.DataType
+		}
+	}
+}
+
 // Validate checks structural correctness against the format and adapter
-// registries, so typos fail at load time.
+// registries, so a typo in a channel file fails at load time rather than
+// when the engine builds the channel. It does not modify the config.
 func (c *Channel) Validate() error {
 	if c.ID == "" {
 		return fmt.Errorf("channel: id is required")
 	}
-	if c.Name == "" {
-		c.Name = c.ID
-	}
 	if c.Source.Type == "" {
 		return fmt.Errorf("channel %s: source.type is required", c.ID)
+	}
+	if !adapter.HasInbound(c.Source.Type) {
+		return fmt.Errorf("channel %s: unknown source type %q (registered: %v)",
+			c.ID, c.Source.Type, adapter.InboundTypes())
 	}
 	if c.Source.DataType == "" {
 		return fmt.Errorf("channel %s: source.dataType is required", c.ID)
@@ -297,7 +314,7 @@ func (c *Channel) Validate() error {
 		}
 		destIDs[d.ID] = true
 		if d.DataType == "" {
-			d.DataType = c.Source.DataType
+			return fmt.Errorf("channel %s: destination %s: dataType is required (Normalize fills it from the source)", c.ID, d.ID)
 		}
 		if _, ok := format.Get(d.DataType); !ok {
 			return fmt.Errorf("channel %s: destination %s: unknown dataType %q (registered: %v)",
@@ -305,6 +322,10 @@ func (c *Channel) Validate() error {
 		}
 		if d.Adapter.Type == "" {
 			return fmt.Errorf("channel %s: destination %s: adapter.type is required", c.ID, d.ID)
+		}
+		if !adapter.HasOutbound(d.Adapter.Type) {
+			return fmt.Errorf("channel %s: destination %s: unknown adapter type %q (registered: %v)",
+				c.ID, d.ID, d.Adapter.Type, adapter.OutboundTypes())
 		}
 		if ma := d.Queue.MaxAttemptCount(); ma == 0 || ma < -1 {
 			return fmt.Errorf("channel %s: destination %s: queue.maxAttempts must be positive or -1", c.ID, d.ID)

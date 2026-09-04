@@ -158,7 +158,12 @@ func runDaemon(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	eng.StartEnabled(ctx)
+	if errs := eng.StartEnabled(ctx); len(errs) > 0 {
+		// Each failure was logged with its channel; the daemon keeps
+		// running so the rest of the channels serve and the operator can
+		// fix and reload the broken ones from the UI.
+		log.Warn("some channels failed to start", "failed", len(errs), "total", len(channels))
+	}
 
 	apiServer := &api.Server{
 		Eng:         eng,

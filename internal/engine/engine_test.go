@@ -142,6 +142,7 @@ func TestChannelLifecycleViaEngine(t *testing.T) {
 			Adapter: config.AdapterRef{Type: "file-writer", Settings: map[string]any{"dir": filepath.Join(work, "out")}},
 		}},
 	}
+	cfg.Normalize()
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}

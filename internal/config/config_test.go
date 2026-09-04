@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	_ "github.com/langhorst/waggle/internal/adapter/file"
+	_ "github.com/langhorst/waggle/internal/adapter/mllp"
 	_ "github.com/langhorst/waggle/internal/format/csvfmt"
 	_ "github.com/langhorst/waggle/internal/format/hl7v2"
 )
@@ -228,5 +230,52 @@ func TestLoadDaemonAuthPolicy(t *testing.T) {
 				t.Errorf("listen not defaulted: %+v", cfg)
 			}
 		})
+	}
+}
+
+// TestValidateChecksAdapterTypes: adapter types are checked against the
+// registry at load time, like data types, instead of when the engine builds
+// the channel.
+func TestValidateChecksAdapterTypes(t *testing.T) {
+	base := func() *Channel {
+		return &Channel{
+			ID:     "c",
+			Source: Source{Type: "file-reader", DataType: "hl7v2", Settings: map[string]any{"dir": "in"}},
+			Destinations: []Destination{{
+				ID:      "out",
+				Adapter: AdapterRef{Type: "file-writer", Settings: map[string]any{"dir": "out"}},
+			}},
+		}
+	}
+	ok := base()
+	ok.Normalize()
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("valid channel rejected: %v", err)
+	}
+	if ok.Name != "c" || ok.Destinations[0].DataType != "hl7v2" {
+		t.Errorf("Normalize defaults: name %q, dest dataType %q", ok.Name, ok.Destinations[0].DataType)
+	}
+
+	badSource := base()
+	badSource.Source.Type = "carrier-pigeon"
+	badSource.Normalize()
+	if err := badSource.Validate(); err == nil || !strings.Contains(err.Error(), "unknown source type") {
+		t.Errorf("unknown source type: %v", err)
+	}
+	badDest := base()
+	badDest.Destinations[0].Adapter.Type = "fax"
+	badDest.Normalize()
+	if err := badDest.Validate(); err == nil || !strings.Contains(err.Error(), "unknown adapter type") {
+		t.Errorf("unknown adapter type: %v", err)
+	}
+
+	// Validate is pure: it reports a missing destination dataType rather
+	// than filling it in.
+	raw := base()
+	if err := raw.Validate(); err == nil || !strings.Contains(err.Error(), "dataType is required") {
+		t.Errorf("Validate without Normalize: %v", err)
+	}
+	if raw.Name != "" {
+		t.Error("Validate modified the config")
 	}
 }

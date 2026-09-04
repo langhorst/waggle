@@ -131,6 +131,12 @@ func NewOutbound(typ string, settings map[string]any) (Outbound, error) {
 	return f(settings)
 }
 
+// HasInbound reports whether an inbound adapter type is registered.
+func HasInbound(typ string) bool { _, ok := inbound[typ]; return ok }
+
+// HasOutbound reports whether an outbound adapter type is registered.
+func HasOutbound(typ string) bool { _, ok := outbound[typ]; return ok }
+
 // InboundTypes returns all registered inbound type names, sorted.
 func InboundTypes() []string { return sortedKeys(inbound) }
 
