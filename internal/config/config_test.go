@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -111,11 +112,18 @@ destinations:
 		"zero maxAttempts": strings.Replace(validChannel, "maxAttempts: 5", "maxAttempts: 0", 1),
 	}
 	dir := t.TempDir()
-	for name, content := range cases {
-		path := writeChannel(t, dir, "bad.yaml", content)
-		if _, err := LoadChannel(path); err == nil {
-			t.Errorf("%s: expected error", name)
-		}
+	names := make([]string, 0, len(cases))
+	for name := range cases {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			path := writeChannel(t, dir, "bad.yaml", cases[name])
+			if _, err := LoadChannel(path); err == nil {
+				t.Error("expected error")
+			}
+		})
 	}
 }
 

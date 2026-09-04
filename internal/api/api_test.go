@@ -18,6 +18,7 @@ import (
 
 	"github.com/langhorst/waggle/internal/config"
 	"github.com/langhorst/waggle/internal/engine"
+	"github.com/langhorst/waggle/internal/events"
 	"github.com/langhorst/waggle/internal/message"
 	"github.com/langhorst/waggle/internal/script"
 	"github.com/langhorst/waggle/internal/store"
@@ -609,4 +610,50 @@ func TestSSEStreamCap(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("slot never freed after closing a stream")
+}
+
+// TestSSEChannelFilterAndResync: a per-channel stream passes only that
+// channel's events, and resync markers pass regardless of channel.
+func TestSSEChannelFilterAndResync(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", h.ts.URL+"/api/channels/feed/events", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Read the initial comment so the subscription is live before publishing.
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() && !strings.HasPrefix(scanner.Text(), ": connected") {
+	}
+	bus := h.eng.Bus()
+	bus.Publish(events.Event{Type: events.TypeMessage, ChannelID: "other", MessageID: 1, State: message.StateSent})
+	bus.Publish(events.Event{Type: events.TypeMessage, ChannelID: "feed", MessageID: 2, State: message.StateSent})
+	bus.Publish(events.Event{Type: events.TypeResync})
+
+	var seen []string
+	for scanner.Scan() && len(seen) < 2 {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			seen = append(seen, strings.TrimPrefix(line, "data: "))
+		}
+	}
+	if len(seen) != 2 {
+		t.Fatalf("events = %v (scan err %v)", seen, scanner.Err())
+	}
+	if !strings.Contains(seen[0], `"channelId":"feed"`) || !strings.Contains(seen[0], `"messageId":2`) {
+		t.Errorf("first event should be feed's, got %s", seen[0])
+	}
+	if !strings.Contains(seen[1], `"type":"resync"`) {
+		t.Errorf("second event should be the resync, got %s", seen[1])
+	}
+	for _, ev := range seen {
+		if strings.Contains(ev, `"other"`) {
+			t.Errorf("another channel's event leaked through the filter: %s", ev)
+		}
+	}
 }

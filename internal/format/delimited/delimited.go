@@ -26,6 +26,32 @@ type Delims struct {
 	HasSub bool
 }
 
+// Validate reports a delimiter set the wire format cannot express. The
+// separators and escape character must be distinct and none may be a
+// segment terminator or alphanumeric: escape sequence bodies are letters
+// and hex digits (\F\, \X0D\), so an alphanumeric delimiter would be
+// split out of the sequences that exist to protect it. HL7 and ASTM both
+// forbid alphanumeric delimiters for the same reason.
+func (dl Delims) Validate() error {
+	chars := []byte{dl.Field, dl.Rep, dl.Comp, dl.Esc}
+	if dl.HasSub {
+		chars = append(chars, dl.Sub)
+	}
+	seen := map[byte]bool{}
+	for _, c := range chars {
+		switch {
+		case c == '\r' || c == '\n' || c == 0:
+			return fmt.Errorf("delimiter %q is not allowed", ByteString(c))
+		case c >= '0' && c <= '9', c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z':
+			return fmt.Errorf("delimiter %q must not be alphanumeric", ByteString(c))
+		case seen[c]:
+			return fmt.Errorf("delimiter %q is used twice", ByteString(c))
+		}
+		seen[c] = true
+	}
+	return nil
+}
+
 // Tree depth levels under the message root.
 const (
 	levelSegment = 1

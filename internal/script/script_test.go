@@ -309,13 +309,18 @@ func TestHotReload(t *testing.T) {
 			}
 			future = future.Add(2 * time.Second)
 			_ = os.Chtimes(path, future, future)
-			time.Sleep(100 * time.Millisecond)
+			// The watcher records the compile error when it tries the
+			// broken file; wait for that rather than guessing a delay.
+			reloadDeadline := time.Now().Add(5 * time.Second)
+			for e.Scripts()[path] == "" {
+				if time.Now().After(reloadDeadline) {
+					t.Fatal("watcher never attempted the broken reload")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 			m3 := hl7Message(t)
 			if err := tr(m3); err != nil || get(m3) != "v2" {
 				t.Fatalf("broken reload must keep v2 active: %v %q", err, get(m3))
-			}
-			if errs := e.Scripts(); errs[path] == "" {
-				t.Error("compile error should be recorded in Scripts()")
 			}
 			return
 		}

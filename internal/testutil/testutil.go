@@ -12,6 +12,7 @@ package testutil
 import (
 	"context"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -321,8 +322,27 @@ type Receiver struct {
 // "astm") on a free port.
 func AckingReceiver(t *testing.T, transport string) *Receiver {
 	t.Helper()
+	return AckingReceiverAt(t, transport, "127.0.0.1:0")
+}
+
+// FreeAddr returns a loopback address that was free a moment ago, for
+// tests that must configure a peer before the receiver exists.
+func FreeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return addr
+}
+
+// AckingReceiverAt is AckingReceiver on a specific address.
+func AckingReceiverAt(t *testing.T, transport, addr string) *Receiver {
+	t.Helper()
 	r := &Receiver{}
-	settings := map[string]any{"addr": "127.0.0.1:0"}
+	settings := map[string]any{"addr": addr}
 	var err error
 	switch transport {
 	case "mllp":

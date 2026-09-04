@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -96,7 +97,7 @@ func TestGoldenTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = append(got, '\n')
-	golden := filepath.Join("..", "..", "..", "testdata", "hl7v2", "adt_a01.tree.json")
+	golden := filepath.Join("testdata", "adt_a01.tree.json")
 	if *update {
 		if err := os.WriteFile(golden, got, 0o644); err != nil {
 			t.Fatal(err)
@@ -418,6 +419,25 @@ func TestFlattenPaths(t *testing.T) {
 	}
 }
 
+// TestInvalidDelimitersRejected: a header whose delimiters cannot
+// round-trip is a parse error rather than a message that silently changes
+// on re-serialization. Duplicates split escape sequences on re-parse, and
+// so do alphanumerics, since escape bodies are letters and hex digits.
+func TestInvalidDelimitersRejected(t *testing.T) {
+	for _, raw := range []string{
+		"MSHB000B\f00000", // fuzz-found: field B, comp/rep/esc all 0
+		"MSH00\x0f0",      // fuzz-found: field separator 0 inside \X0F\
+		"MSH|^^\\&|A\r",   // comp == rep
+		"MSH|^~^&|A\r",    // esc == comp
+		"MSH|^~\\\r|A\r",  // sub is the segment terminator
+		"MSH|^~\\E|A\r",   // sub is an escape letter
+	} {
+		if _, err := dt.Parse([]byte(raw)); err == nil {
+			t.Errorf("Parse(%q): expected a delimiter error", raw)
+		}
+	}
+}
+
 func TestParseErrors(t *testing.T) {
 	for name, raw := range map[string]string{
 		"empty":          "",
@@ -447,9 +467,18 @@ func FuzzParse(f *testing.F) {
 		if err != nil {
 			t.Fatalf("Serialize after successful Parse: %v", err)
 		}
-		// Serialized output must itself re-parse.
-		if _, err := dt.Parse(out); err != nil {
+		// Serialized output must itself re-parse, to the same tree, and
+		// serialize to the same bytes: the canonical form is a fixed point.
+		root2, err := dt.Parse(out)
+		if err != nil {
 			t.Fatalf("re-Parse of serialized output failed: %v\ninput: %q\noutput: %q", err, raw, out)
+		}
+		if !reflect.DeepEqual(root, root2) {
+			t.Fatalf("Parse(Serialize(tree)) != tree\ninput: %q\noutput: %q", raw, out)
+		}
+		out2, err := dt.Serialize(root2)
+		if err != nil || !bytes.Equal(out, out2) {
+			t.Fatalf("canonical form not stable: %q -> %q (%v)", out, out2, err)
 		}
 	})
 }

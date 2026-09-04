@@ -374,3 +374,26 @@ func TestReadsRunAlongsideWrites(t *testing.T) {
 		t.Fatal("read blocked behind an open write transaction")
 	}
 }
+
+// TestInsertCountTriggersPrune: retention runs on its own goroutine when
+// enough inserts have accumulated, without anyone calling Prune.
+func TestInsertCountTriggersPrune(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	s.SetRetention("c1", 5)
+	for i := 0; i < pruneCheckEvery+1; i++ {
+		record(t, s, "c1", "m")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		list, err := s.ListMessages(ctx, "c1", ListQuery{Limit: 1000})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(list) <= 5 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("insert-count trigger never pruned the channel")
+}

@@ -177,6 +177,9 @@ func (f *Format) Parse(raw []byte) (*message.Node, error) {
 		return nil, fmt.Errorf("%s: message must start with a header segment (%s)", f.spec.Name, f.spec.HeaderHint)
 	}
 	dl := f.delimsFromHeader(lines[0])
+	if err := dl.Validate(); err != nil {
+		return nil, fmt.Errorf("%s: header delimiters: %w", f.spec.Name, err)
+	}
 	decode := f.Decoder(dl)
 	sep := ByteString(dl.Field)
 
@@ -226,6 +229,9 @@ func (f *Format) Serialize(root *message.Node) ([]byte, error) {
 		return nil, fmt.Errorf("%s: empty tree", f.spec.Name)
 	}
 	dl := f.Delims(root)
+	if err := dl.Validate(); err != nil {
+		return nil, fmt.Errorf("%s: header delimiters: %w", f.spec.Name, err)
+	}
 	encode := f.Encoder(dl)
 	var b strings.Builder
 	for _, seg := range root.Children {

@@ -298,3 +298,33 @@ func TestWriterConfigValidation(t *testing.T) {
 		t.Error("invalid glob should fail")
 	}
 }
+
+// TestReaderRestart: Stop then Start again resumes polling the directory.
+func TestReaderRestart(t *testing.T) {
+	dir := t.TempDir()
+	r, err := NewReader(map[string]any{"dir": dir, "interval": "20ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered := make(chan string, 4)
+	deliver := func(ctx context.Context, raw []byte, meta map[string]string) (adapter.Receipt, error) {
+		delivered <- string(raw)
+		done := make(chan adapter.AckDecision, 1)
+		done <- adapter.AckDecision{Code: "AA"}
+		return adapter.Receipt{Done: done}, nil
+	}
+	for round := 1; round <= 2; round++ {
+		if err := r.Start(context.Background(), deliver); err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		writeInput(t, dir, "r.hl7", "round")
+		select {
+		case <-delivered:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("round %d: nothing delivered", round)
+		}
+		if err := r.Stop(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

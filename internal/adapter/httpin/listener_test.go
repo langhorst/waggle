@@ -76,11 +76,14 @@ func post(t *testing.T, url, body string, opt func(*http.Request)) (int, map[str
 }
 
 func TestImmediateMode(t *testing.T) {
-	var gotRaw []byte
-	var gotMeta map[string]string
+	type delivery struct {
+		raw  []byte
+		meta map[string]string
+	}
+	deliveries := make(chan delivery, 1)
 	url := startListener(t, map[string]any{"path": "/intake"},
 		func(ctx context.Context, raw []byte, meta map[string]string) (adapter.Receipt, error) {
-			gotRaw, gotMeta = raw, meta
+			deliveries <- delivery{raw, meta}
 			done := make(chan adapter.AckDecision, 1)
 			return adapter.Receipt{MessageID: 42, Done: done}, nil
 		})
@@ -91,6 +94,8 @@ func TestImmediateMode(t *testing.T) {
 	if code != http.StatusAccepted || body["messageId"] != float64(42) {
 		t.Fatalf("immediate = %d %v", code, body)
 	}
+	got := <-deliveries
+	gotRaw, gotMeta := got.raw, got.meta
 	if string(gotRaw) != `{"hello":"world"}` {
 		t.Errorf("raw = %q", gotRaw)
 	}
@@ -203,7 +208,9 @@ func TestStopUnblocksHeldRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	held := make(chan struct{}, 1)
 	err = l.Start(context.Background(), func(ctx context.Context, raw []byte, meta map[string]string) (adapter.Receipt, error) {
+		held <- struct{}{}
 		return adapter.Receipt{MessageID: 1, Done: make(chan adapter.AckDecision, 1)}, nil
 	})
 	if err != nil {
@@ -225,7 +232,7 @@ func TestStopUnblocksHeldRequests(t *testing.T) {
 		_ = json.NewDecoder(resp.Body).Decode(&body)
 		results <- result{code: resp.StatusCode, body: body}
 	}()
-	time.Sleep(100 * time.Millisecond) // let the request arrive and block
+	<-held // the request has been handed off and is now waiting on the pipeline
 	stopped := make(chan struct{})
 	go func() { _ = l.Stop(); close(stopped) }()
 	select {
@@ -323,4 +330,26 @@ func selfSigned(t *testing.T) (certPEM, keyPEM []byte) {
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	return certPEM, keyPEM
+}
+
+// TestListenerRestart: Stop then Start again serves requests on a new port.
+func TestListenerRestart(t *testing.T) {
+	l, err := NewListener(map[string]any{"listen": "127.0.0.1:0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliver := func(ctx context.Context, raw []byte, meta map[string]string) (adapter.Receipt, error) {
+		return adapter.Receipt{MessageID: 7, Done: make(chan adapter.AckDecision, 1)}, nil
+	}
+	for round := 1; round <= 2; round++ {
+		if err := l.Start(context.Background(), deliver); err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		if code, body := post(t, "http://"+l.Addr()+"/", "hello", nil); code != http.StatusAccepted || body["messageId"] != float64(7) {
+			t.Fatalf("round %d: %d %v", round, code, body)
+		}
+		if err := l.Stop(); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
