@@ -553,3 +553,149 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// gatedOut blocks every Send until released and reports when a send has
+// started, so tests can fill the intake buffer deterministically.
+type gatedOut struct {
+	fakeOut
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (o *gatedOut) Send(ctx context.Context, payload []byte, meta map[string]string) error {
+	o.entered <- struct{}{}
+	<-o.release
+	return o.fakeOut.Send(ctx, payload, meta)
+}
+
+// TestIntakeBackpressure: with the pipeline busy and the buffer full, a
+// further deliver blocks the source (delaying its transport ACK) instead of
+// spawning yet another goroutine.
+func TestIntakeBackpressure(t *testing.T) {
+	out := &gatedOut{entered: make(chan struct{}, 16), release: make(chan struct{})}
+	ch, src := newTestChannel(NewMemoryRecorder(), &Destination{ID: "d1", OutType: hl7Type(), Adapter: out})
+	ch.MaxPending = 2
+	if err := ch.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer ch.Stop()
+
+	msg := func(i int) []byte {
+		return []byte(strings.Replace(sampleHL7, "CTRL001", fmt.Sprintf("CTRL%03d", i), 1))
+	}
+	// #1 is taken by the pipeline and parks inside Send.
+	if _, err := src.deliver(context.Background(), msg(1), nil); err != nil {
+		t.Fatal(err)
+	}
+	<-out.entered
+	// #2 and #3 fill the buffer without blocking.
+	for i := 2; i <= 3; i++ {
+		returned := make(chan error, 1)
+		go func() { _, err := src.deliver(context.Background(), msg(i), nil); returned <- err }()
+		select {
+		case err := <-returned:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("deliver #%d blocked with buffer space available", i)
+		}
+	}
+	// #4 must block until the pipeline makes room.
+	fourth := make(chan error, 1)
+	go func() { _, err := src.deliver(context.Background(), msg(4), nil); fourth <- err }()
+	select {
+	case err := <-fourth:
+		t.Fatalf("deliver #4 returned (%v) although the intake buffer was full", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(out.release)
+	select {
+	case err := <-fourth:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("deliver #4 never unblocked")
+	}
+	for i := 0; i < 3; i++ {
+		<-out.entered
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(out.sent()) < 4 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	sent := out.sent()
+	if len(sent) != 4 {
+		t.Fatalf("sent %d messages, want 4", len(sent))
+	}
+	for i, p := range sent {
+		if want := fmt.Sprintf("CTRL%03d", i+1); !strings.Contains(string(p), want) {
+			t.Errorf("message %d = %q, want control ID %s (order lost)", i, p, want)
+		}
+	}
+}
+
+// TestStopDrainsAcceptedMessages: everything deliver accepted is processed
+// before Stop returns, and the channel restarts cleanly afterwards.
+func TestStopDrainsAcceptedMessages(t *testing.T) {
+	out := &fakeOut{}
+	ch, src := newTestChannel(NewMemoryRecorder(), &Destination{ID: "d1", OutType: hl7Type(), Adapter: out})
+	ch.MaxPending = 64
+	for round := 1; round <= 2; round++ {
+		if err := ch.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		var receipts []adapter.Receipt
+		for i := 0; i < 20; i++ {
+			rec, err := src.deliver(context.Background(), []byte(sampleHL7), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipts = append(receipts, rec)
+		}
+		if err := ch.Stop(); err != nil {
+			t.Fatal(err)
+		}
+		if got := len(out.sent()); got != 20*round {
+			t.Fatalf("round %d: %d sent after Stop, want %d", round, got, 20*round)
+		}
+		for _, rec := range receipts {
+			select {
+			case <-rec.Done:
+			default:
+				t.Fatal("a receipt was left unresolved by Stop")
+			}
+		}
+		if _, err := src.deliver(context.Background(), []byte(sampleHL7), nil); err == nil {
+			t.Fatal("stopped channel accepted a message")
+		}
+	}
+}
+
+// TestInjectWhilePaused: replay bypasses the source, so it works on a
+// paused channel and is refused on a stopped one.
+func TestInjectWhilePaused(t *testing.T) {
+	out := &fakeOut{}
+	ch, _ := newTestChannel(NewMemoryRecorder(), &Destination{ID: "d1", OutType: hl7Type(), Adapter: out})
+	if err := ch.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.Pause(); err != nil {
+		t.Fatal(err)
+	}
+	m := &message.Message{ChannelID: "test", Raw: []byte(sampleHL7), DataType: "hl7v2", State: message.StateReceived, ReceivedAt: time.Now()}
+	if _, err := ch.Inject(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.sent()) != 1 {
+		t.Fatalf("injected message not delivered: %d sent", len(out.sent()))
+	}
+	if _, err := ch.Inject(context.Background(), m); err == nil {
+		t.Fatal("stopped channel accepted a replay")
+	}
+}

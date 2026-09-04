@@ -160,13 +160,14 @@ func (e *Engine) build(cfg *config.Channel) (*channel.Channel, error) {
 	}
 
 	ch := &channel.Channel{
-		ID:       cfg.ID,
-		Name:     cfg.Name,
-		InType:   inType,
-		Source:   source,
-		Recorder: e.recorder,
-		Bus:      e.bus,
-		Log:      e.log,
+		ID:         cfg.ID,
+		Name:       cfg.Name,
+		InType:     inType,
+		Source:     source,
+		Recorder:   e.recorder,
+		Bus:        e.bus,
+		Log:        e.log,
+		MaxPending: cfg.MaxPending,
 	}
 	if e.store != nil {
 		ch.Queue = e.store

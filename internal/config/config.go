@@ -141,7 +141,11 @@ type Channel struct {
 	Enabled *bool  `yaml:"enabled"` // default true
 	// Retention caps stored messages for this channel; -1 = unlimited.
 	// Default 1000.
-	Retention    *int          `yaml:"retention"`
+	Retention *int `yaml:"retention"`
+	// MaxPending bounds messages accepted but not yet processed; when the
+	// buffer is full the source blocks (and its transport ACK waits).
+	// Default 256.
+	MaxPending   int           `yaml:"maxPending"`
 	Source       Source        `yaml:"source"`
 	Filter       string        `yaml:"filter"`       // path to .js Message Filter
 	Transformers []string      `yaml:"transformers"` // ordered .js Message Translator chain
@@ -308,6 +312,9 @@ func (c *Channel) Validate() error {
 	}
 	if r := c.RetentionCount(); r == 0 || r < -1 {
 		return fmt.Errorf("channel %s: retention must be positive or -1 (unlimited)", c.ID)
+	}
+	if c.MaxPending < 0 {
+		return fmt.Errorf("channel %s: maxPending must be positive", c.ID)
 	}
 	return nil
 }

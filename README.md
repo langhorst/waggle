@@ -192,6 +192,11 @@ workflow, with results flowing up and orders/queries flowing down —
   Covered by `TestFHIRXMLWebhookToHL7`, including 400 for a non-Patient
   document and 500 for malformed XML.
 
+**Intake.** Each channel processes messages on one goroutine, in arrival
+order, from a bounded buffer (`maxPending`, default 256). When the buffer
+is full the source adapter blocks and its transport ACK waits, so a burst
+becomes backpressure on the sender rather than unbounded memory here.
+
 **Delivery.** Each queueing destination has exactly one worker draining
 its FIFO queue: transient failures back off exponentially (jittered,
 capped at 5m) without reordering; application NAKs (AE/AR) dead-letter

@@ -3,9 +3,12 @@
 // Translator chain, then a Recipient List of destinations, each with its own
 // optional filter/translator chain and outbound Channel Adapter.
 //
-// Message processing is strictly sequential per channel. Every state
-// transition goes through the Recorder (the persistence seam) and is
-// published on the event bus.
+// Message processing is strictly sequential per channel: one pipeline
+// goroutine drains a bounded intake buffer in arrival order. When the
+// buffer is full the source adapter blocks in deliver, which delays its
+// transport ACK, so backpressure reaches the sender instead of piling up
+// goroutines. Every state transition goes through the Recorder (the
+// persistence seam) and is published on the event bus.
 package channel
 
 import (
@@ -111,6 +114,9 @@ type Channel struct {
 	Queue Queuer
 	Bus   *events.Bus
 	Log   *slog.Logger
+	// MaxPending bounds messages recorded but not yet processed. Zero
+	// means DefaultMaxPending.
+	MaxPending int
 
 	// lifecycleMu serializes Start/Pause/Resume/Stop. It is held across
 	// adapter calls; mu never is. Inbound adapters call deliver from their
@@ -118,14 +124,27 @@ type Channel struct {
 	// so holding mu (which deliver needs) while calling Source.Stop would
 	// deadlock the moment a message arrived mid-transition.
 	lifecycleMu sync.Mutex
-	// mu guards status and runCancel only.
+	// mu guards the fields below.
 	mu        sync.Mutex
 	status    Status
+	stopping  bool // Stop in progress: refuse intake, keep draining
 	runCancel context.CancelFunc
-	// pipeMu serializes message processing: one message at a time per
-	// channel, in arrival order.
-	pipeMu sync.Mutex
-	wg     sync.WaitGroup
+	// pending feeds the pipeline goroutine; nil while stopped. inflight
+	// counts deliver/Inject calls between their status check and their
+	// handoff into pending, so Stop knows when it may close the buffer.
+	pending  chan *pendingMessage
+	pipeDone chan struct{}
+	inflight sync.WaitGroup
+}
+
+// DefaultMaxPending is the intake buffer size when MaxPending is unset.
+const DefaultMaxPending = 256
+
+// pendingMessage is one recorded message waiting for the pipeline.
+type pendingMessage struct {
+	ctx  context.Context
+	m    *message.Message
+	done chan<- adapter.AckDecision // nil when nobody waits (replay)
 }
 
 // Status returns the channel's lifecycle state.
@@ -155,8 +174,27 @@ func (c *Channel) Start(ctx context.Context) error {
 			return fmt.Errorf("channel %s: destination %s: %w", c.ID, d.ID, err)
 		}
 	}
+	size := c.MaxPending
+	if size <= 0 {
+		size = DefaultMaxPending
+	}
+	pending := make(chan *pendingMessage, size)
+	pipeDone := make(chan struct{})
+	c.mu.Lock()
+	c.pending, c.pipeDone = pending, pipeDone
+	c.mu.Unlock()
+	go c.run(pending, pipeDone)
+
 	if err := c.Source.Start(runCtx, c.deliver); err != nil {
 		cancel()
+		c.mu.Lock()
+		c.pending, c.pipeDone = nil, nil
+		c.mu.Unlock()
+		close(pending)
+		<-pipeDone
+		for _, d := range c.Destinations {
+			_ = d.Adapter.Close()
+		}
 		return fmt.Errorf("channel %s: source: %w", c.ID, err)
 	}
 	c.mu.Lock()
@@ -164,6 +202,18 @@ func (c *Channel) Start(ctx context.Context) error {
 	c.setStatusLocked(StatusStarted)
 	c.mu.Unlock()
 	return nil
+}
+
+// run is the pipeline goroutine: it processes pending messages one at a
+// time, in arrival order, until the buffer is closed and drained.
+func (c *Channel) run(pending <-chan *pendingMessage, done chan<- struct{}) {
+	defer close(done)
+	for pm := range pending {
+		decision := c.process(pm.ctx, pm.m)
+		if pm.done != nil {
+			pm.done <- decision
+		}
+	}
 }
 
 // Pause stops intake only. Messages the source hands over while the stop
@@ -200,31 +250,50 @@ func (c *Channel) resumeLocked(ctx context.Context) error {
 	return nil
 }
 
-// Stop halts intake, waits for in-flight messages, and closes destination
-// adapters.
+// Stop halts intake, drains messages already accepted, and closes
+// destination adapters.
 func (c *Channel) Stop() error {
 	c.lifecycleMu.Lock()
 	defer c.lifecycleMu.Unlock()
 
 	c.mu.Lock()
 	status := c.status
-	cancel := c.runCancel
-	c.runCancel = nil
 	c.mu.Unlock()
-
-	if status == StatusStarted || status == StatusPaused {
-		if status == StatusStarted {
-			_ = c.Source.Stop()
-		}
-		if cancel != nil {
-			cancel()
-		}
-		c.wg.Wait()
-		for _, d := range c.Destinations {
-			_ = d.Adapter.Close()
-		}
+	if status != StatusStarted && status != StatusPaused {
+		c.setStatus(StatusStopped)
+		return nil
 	}
-	c.setStatus(StatusStopped)
+
+	// 1. The source stops producing. Its goroutines may be blocked in
+	//    deliver on a full buffer; the pipeline goroutine is still
+	//    draining, so they return.
+	if status == StatusStarted {
+		_ = c.Source.Stop()
+	}
+	// 2. Refuse new intake, wait for handoffs already past the status
+	//    check, then close the buffer and let the pipeline drain it.
+	c.mu.Lock()
+	c.stopping = true
+	pending, pipeDone := c.pending, c.pipeDone
+	cancel := c.runCancel
+	c.pending, c.pipeDone, c.runCancel = nil, nil, nil
+	c.mu.Unlock()
+	c.inflight.Wait()
+	if pending != nil {
+		close(pending)
+		<-pipeDone
+	}
+	// 3. Nothing is processing any more: tear down adapters.
+	if cancel != nil {
+		cancel()
+	}
+	for _, d := range c.Destinations {
+		_ = d.Adapter.Close()
+	}
+	c.mu.Lock()
+	c.stopping = false
+	c.setStatusLocked(StatusStopped)
+	c.mu.Unlock()
 	return nil
 }
 
@@ -247,12 +316,11 @@ func (c *Channel) setStatusLocked(s Status) {
 
 // deliver is the adapter.DeliverFunc handed to the source adapter.
 func (c *Channel) deliver(ctx context.Context, raw []byte, meta map[string]string) (adapter.Receipt, error) {
-	c.mu.Lock()
-	started := c.status == StatusStarted
-	c.mu.Unlock()
-	if !started {
-		return adapter.Receipt{}, fmt.Errorf("channel %s: not accepting messages", c.ID)
+	pending, err := c.admit(StatusStarted)
+	if err != nil {
+		return adapter.Receipt{}, err
 	}
+	defer c.inflight.Done()
 
 	m := &message.Message{
 		ChannelID:     c.ID,
@@ -269,34 +337,58 @@ func (c *Channel) deliver(ctx context.Context, raw []byte, meta map[string]strin
 	c.publishMessage(m.ID, message.StateReceived, "")
 
 	done := make(chan adapter.AckDecision, 1)
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		c.pipeMu.Lock()
-		defer c.pipeMu.Unlock()
-		done <- c.process(context.WithoutCancel(ctx), m)
-	}()
+	c.handoff(ctx, pending, m, done)
 	return adapter.Receipt{MessageID: m.ID, Done: done}, nil
 }
 
 // Inject records and processes a message that did not arrive through the
-// source adapter — message replay. The channel must not be stopped.
+// source adapter — message replay. The channel must not be stopped
+// (paused is fine: replay bypasses the source).
 func (c *Channel) Inject(ctx context.Context, m *message.Message) (int64, error) {
-	if c.Status() == StatusStopped {
-		return 0, fmt.Errorf("channel %s: stopped; start it to replay messages", c.ID)
+	pending, err := c.admit(StatusStarted, StatusPaused)
+	if err != nil {
+		return 0, fmt.Errorf("%w; start it to replay messages", err)
 	}
+	defer c.inflight.Done()
 	if err := c.Recorder.Record(ctx, m); err != nil {
 		return 0, fmt.Errorf("channel %s: recording replay: %w", c.ID, err)
 	}
 	c.publishMessage(m.ID, message.StateReceived, "")
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		c.pipeMu.Lock()
-		defer c.pipeMu.Unlock()
-		_ = c.process(context.WithoutCancel(ctx), m)
-	}()
+	c.handoff(ctx, pending, m, nil)
 	return m.ID, nil
+}
+
+// admit checks that the channel accepts intake in one of the given states
+// and registers the caller as in flight (the caller must inflight.Done()).
+// The returned buffer is the one to hand the message to; Stop closes it
+// only after every in-flight caller has finished.
+func (c *Channel) admit(states ...Status) (chan *pendingMessage, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ok := !c.stopping && c.pending != nil
+	if ok {
+		ok = false
+		for _, s := range states {
+			if c.status == s {
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok {
+		return nil, fmt.Errorf("channel %s: not accepting messages", c.ID)
+	}
+	c.inflight.Add(1)
+	return c.pending, nil
+}
+
+// handoff queues a recorded message for the pipeline. It blocks while the
+// buffer is full: the message is already recorded (the engine owns it),
+// so it must be processed, and blocking here is what turns a burst into
+// backpressure on the transport. The wait is bounded by the pipeline
+// draining, which Stop keeps running until the buffer is empty.
+func (c *Channel) handoff(ctx context.Context, pending chan *pendingMessage, m *message.Message, done chan<- adapter.AckDecision) {
+	pending <- &pendingMessage{ctx: context.WithoutCancel(ctx), m: m, done: done}
 }
 
 // process runs one message through the pipeline and returns the ACK
