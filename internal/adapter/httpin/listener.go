@@ -45,6 +45,9 @@ type ListenerConfig struct {
 	HoldTimeout adapter.Duration `yaml:"holdTimeout"`
 	// ReadTimeout bounds reading one request. Default 30s.
 	ReadTimeout adapter.Duration `yaml:"readTimeout"`
+	// IdleTimeout bounds how long a keep-alive connection may sit idle
+	// between requests. Default 60s.
+	IdleTimeout adapter.Duration `yaml:"idleTimeout"`
 	// MaxBodySize bounds one message's bytes. Default 10 MiB.
 	MaxBodySize int64 `yaml:"maxBodySize"`
 
@@ -97,6 +100,9 @@ func NewListener(settings map[string]any) (*Listener, error) {
 	if cfg.ReadTimeout <= 0 {
 		cfg.ReadTimeout = adapter.Duration(30 * time.Second)
 	}
+	if cfg.IdleTimeout <= 0 {
+		cfg.IdleTimeout = adapter.Duration(60 * time.Second)
+	}
 	if cfg.MaxBodySize <= 0 {
 		cfg.MaxBodySize = 10 << 20
 	}
@@ -126,7 +132,12 @@ func (l *Listener) Start(ctx context.Context, deliver adapter.DeliverFunc) error
 	srv := &http.Server{
 		Handler:     http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { l.handle(runCtx, w, r, deliver) }),
 		ReadTimeout: time.Duration(l.cfg.ReadTimeout),
-		BaseContext: func(net.Listener) context.Context { return runCtx },
+		// A destination-mode response is held for up to HoldTimeout after
+		// the request is read, so the write budget must cover that.
+		WriteTimeout:   time.Duration(l.cfg.HoldTimeout) + 10*time.Second,
+		IdleTimeout:    time.Duration(l.cfg.IdleTimeout),
+		MaxHeaderBytes: 1 << 20,
+		BaseContext:    func(net.Listener) context.Context { return runCtx },
 	}
 	done := make(chan struct{})
 

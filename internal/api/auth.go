@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/langhorst/waggle/internal/config"
 )
@@ -39,6 +40,11 @@ func (s *Server) protect(next http.Handler) http.Handler {
 			s.writeError(w, http.StatusForbidden, errCrossSite)
 			return
 		}
+		// A server-wide WriteTimeout would cut every SSE stream, so the
+		// response deadline is applied per request and streams skip it.
+		if !isEventStream(r) {
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(responseDeadline))
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -71,6 +77,10 @@ func (s *Server) authorized(r *http.Request) bool {
 
 func equalString(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+func isEventStream(r *http.Request) bool {
+	return r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/events")
 }
 
 func safeMethod(m string) bool {

@@ -32,6 +32,7 @@ const sampleHL7 = "MSH|^~\\&|SEND|SFAC|RECV|RFAC|20260730||ADT^A01|CTRL001|P|2.5
 type harness struct {
 	t       *testing.T
 	ts      *httptest.Server
+	srv     *Server
 	eng     *engine.Engine
 	st      *store.Store
 	work    string
@@ -108,7 +109,7 @@ destinations:
 	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return &harness{t: t, ts: ts, eng: eng, st: st, work: work, inDir: inDir, scripts: scripts}
+	return &harness{t: t, ts: ts, srv: srv, eng: eng, st: st, work: work, inDir: inDir, scripts: scripts}
 }
 
 func (h *harness) do(method, path string, body string) (int, []byte) {
@@ -546,4 +547,80 @@ func TestSSEStream(t *testing.T) {
 	if !sawMessageEvent {
 		t.Fatalf("no message event on SSE stream (scan err: %v)", scanner.Err())
 	}
+}
+
+func TestListLimitValidation(t *testing.T) {
+	h := newHarness(t)
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{"", 200},
+		{"?limit=10", 200},
+		{"?limit=100000", 200}, // clamped, not rejected
+		{"?limit=0", 400},
+		{"?limit=-5", 400},
+		{"?limit=ten", 400},
+		{"?before_id=abc", 400},
+		{"?before_id=-1", 400},
+		{"?before_id=5", 200},
+	} {
+		for _, path := range []string{"/api/channels/feed/messages", "/api/channels/feed/dlq"} {
+			if strings.Contains(tc.query, "before_id") && strings.HasSuffix(path, "dlq") {
+				continue
+			}
+			code, raw := h.do("GET", path+tc.query, "")
+			if code != tc.want {
+				t.Errorf("GET %s%s = %d %s, want %d", path, tc.query, code, raw, tc.want)
+			}
+		}
+	}
+}
+
+func TestQueryLimitClamps(t *testing.T) {
+	req := httptest.NewRequest("GET", "/x?limit=99999", nil)
+	if n, err := queryLimit(req); err != nil || n != maxListLimit {
+		t.Errorf("clamped limit = %d, %v", n, err)
+	}
+	req = httptest.NewRequest("GET", "/x", nil)
+	if n, err := queryLimit(req); err != nil || n != defaultListLimit {
+		t.Errorf("default limit = %d, %v", n, err)
+	}
+}
+
+func TestSSEStreamCap(t *testing.T) {
+	h := newHarness(t)
+	h.srv.MaxEventStreams = 2
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	open := func() *http.Response {
+		t.Helper()
+		req, _ := http.NewRequestWithContext(ctx, "GET", h.ts.URL+"/api/events", nil)
+		req.Header.Set("Authorization", "Bearer "+testToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return resp
+	}
+	first, second := open(), open()
+	if first.StatusCode != 200 || second.StatusCode != 200 {
+		t.Fatalf("first streams = %d, %d", first.StatusCode, second.StatusCode)
+	}
+	third := open()
+	if third.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("third stream = %d, want 503", third.StatusCode)
+	}
+	// Closing one stream frees a slot.
+	first.Body.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if resp := open(); resp.StatusCode == 200 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("slot never freed after closing a stream")
 }

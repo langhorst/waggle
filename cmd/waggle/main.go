@@ -177,10 +177,15 @@ func runDaemon(args []string) int {
 	if cfg.Auth.Disabled {
 		log.Warn("http api authentication is disabled", "addr", cfg.Listen)
 	}
+	// No WriteTimeout: the SSE endpoints stream indefinitely, and the API
+	// applies a per-response deadline to everything else.
 	httpServer := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           apiServer.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
 	}
 	go func() {
 		log.Info("http api listening", "addr", cfg.Listen)

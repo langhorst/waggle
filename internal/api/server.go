@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/langhorst/waggle/internal/engine"
@@ -34,10 +35,25 @@ type Server struct {
 	ScriptsRoot string
 	// Auth is the credential policy every route is checked against.
 	Auth AuthConfig
-	Log  *slog.Logger
+	// MaxEventStreams caps concurrent SSE subscribers; each one costs a
+	// goroutine, a bus buffer, and a heartbeat timer. Default 64.
+	MaxEventStreams int
+	Log             *slog.Logger
 
-	started time.Time
+	started      time.Time
+	eventStreams atomic.Int64
 }
+
+// Limits on list endpoints. The store defaults limit to 50 when unset;
+// the API additionally caps it so a client cannot ask for the whole table.
+const (
+	defaultListLimit = 50
+	maxListLimit     = 500
+)
+
+// responseDeadline bounds how long a non-streaming handler may take to
+// write its response. SSE handlers are exempt (see protect).
+const responseDeadline = 30 * time.Second
 
 // Handler builds the route table.
 func (s *Server) Handler() http.Handler {
@@ -87,13 +103,34 @@ func (s *Server) writeError(w http.ResponseWriter, status int, err error) {
 	s.writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
+// writeInternalError logs the real error and answers with a generic
+// message: internal errors carry filesystem paths and SQL detail that
+// belong in the log, not in a response body.
+func (s *Server) writeInternalError(w http.ResponseWriter, what string, err error) {
+	s.Log.Error(what, "error", err)
+	s.writeError(w, http.StatusInternalServerError, errors.New(what+" failed"))
+}
+
 func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		s.writeError(w, http.StatusNotFound, err)
 	default:
-		s.writeError(w, http.StatusInternalServerError, err)
+		s.writeInternalError(w, "store query", err)
 	}
+}
+
+// queryLimit parses the limit query parameter, defaulting and clamping it.
+func queryLimit(r *http.Request) (int, error) {
+	v := r.URL.Query().Get("limit")
+	if v == "" {
+		return defaultListLimit, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("invalid limit %q", v)
+	}
+	return min(n, maxListLimit), nil
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -169,12 +206,19 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusNotImplemented, errors.New("persistence disabled"))
 		return
 	}
-	q := store.ListQuery{}
-	if v := r.URL.Query().Get("limit"); v != "" {
-		q.Limit, _ = strconv.Atoi(v)
+	limit, err := queryLimit(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
 	}
+	q := store.ListQuery{Limit: limit}
 	if v := r.URL.Query().Get("before_id"); v != "" {
-		q.BeforeID, _ = strconv.ParseInt(v, 10, 64)
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || id < 0 {
+			s.writeError(w, http.StatusBadRequest, fmt.Errorf("invalid before_id %q", v))
+			return
+		}
+		q.BeforeID = id
 	}
 	if v := r.URL.Query().Get("state"); v != "" {
 		q.State = message.State(v)
@@ -284,9 +328,10 @@ func (s *Server) handleDLQ(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusNotImplemented, errors.New("persistence disabled"))
 		return
 	}
-	limit := 50
-	if v := r.URL.Query().Get("limit"); v != "" {
-		limit, _ = strconv.Atoi(v)
+	limit, err := queryLimit(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
 	}
 	entries, err := st.DeadLetters(r.Context(), r.PathValue("id"), limit)
 	if err != nil {
@@ -441,9 +486,9 @@ func (s *Server) handleScriptRead(w http.ResponseWriter, r *http.Request) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			s.writeError(w, http.StatusNotFound, err)
+			s.writeError(w, http.StatusNotFound, errors.New("script not found"))
 		} else {
-			s.writeError(w, http.StatusInternalServerError, err)
+			s.writeInternalError(w, "reading script", err)
 		}
 		return
 	}
@@ -473,8 +518,7 @@ func (s *Server) handleScriptWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := writeFileAtomic(path, body, 0o644); err != nil {
-		s.Log.Error("writing script", "path", path, "error", err)
-		s.writeError(w, http.StatusInternalServerError, errors.New("writing script failed"))
+		s.writeInternalError(w, "writing script", err)
 		return
 	}
 	// Recompile immediately so the editor gets compile feedback; a failed

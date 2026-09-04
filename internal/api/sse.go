@@ -9,6 +9,8 @@ import (
 	"github.com/langhorst/waggle/internal/events"
 )
 
+const defaultMaxEventStreams = 64
+
 // handleEvents streams the event bus over Server-Sent Events. With a {id}
 // path segment present, only that channel's events pass (resyncs always
 // pass — they mean "refetch", regardless of channel). Events carry IDs
@@ -20,6 +22,17 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, fmt.Errorf("streaming unsupported"))
 		return
 	}
+	limit := s.MaxEventStreams
+	if limit <= 0 {
+		limit = defaultMaxEventStreams
+	}
+	if n := s.eventStreams.Add(1); n > int64(limit) {
+		s.eventStreams.Add(-1)
+		w.Header().Set("Retry-After", "5")
+		s.writeError(w, http.StatusServiceUnavailable, fmt.Errorf("too many event streams (limit %d)", limit))
+		return
+	}
+	defer s.eventStreams.Add(-1)
 	channelFilter := r.PathValue("id")
 
 	ch, cancel := s.Eng.Bus().Subscribe(64)
