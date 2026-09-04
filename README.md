@@ -259,7 +259,8 @@ header must be same-origin.
 ## Development
 
 ```sh
-make check    # the pre-push gate: gofmt check + go vet + race-enabled tests
+make check    # the pre-push gate: lint + race-enabled tests (what CI runs)
+make lint     # gofmt check + go vet + go mod tidy check + golangci-lint
 make test     # plain test run (unit, functional, E2E — no network needed)
 make cover    # race tests with a coverage summary
 make fuzz     # 30s of parser fuzzing per format (FUZZTIME=2m make fuzz for longer)
@@ -267,7 +268,9 @@ make bench    # parser + pipeline benchmarks
 ```
 
 `make help` lists everything; the plain `go test ./...` / `go vet ./...`
-commands behind these targets work as ever.
+commands behind these targets work as ever. `make lint` needs
+[golangci-lint](https://golangci-lint.run/docs/welcome/install/) on the
+path; its configuration lives in `.golangci.yml`.
 
 Package map: `internal/message` (tree, states, diff) · `internal/format/*`
 (data types) · `internal/adapter/*` (Channel Adapters + registry) ·

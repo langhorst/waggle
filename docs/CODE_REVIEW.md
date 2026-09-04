@@ -5,6 +5,12 @@ Date: 2026-09-04. Scope: the whole repository at commit `f2d084d`
 cites a file and line; measured numbers were reproduced against this
 checkout. Line numbers refer to that commit.
 
+> **Status.** Every finding in this document has since been implemented
+> on this branch, one commit per finding group (see `git log` from the
+> commit that added this file). Line references below describe the code
+> as it was at `f2d084d`, not the current tree; the document is kept as
+> the rationale for those changes.
+
 ## Executive summary
 
 Waggle is in unusually good shape for its age. The architecture is
