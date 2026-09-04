@@ -319,7 +319,10 @@ func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDe
 		}
 		if !keep {
 			m.State = message.StateFiltered
-			_ = c.Recorder.SetState(ctx, m.ID, message.StateFiltered, "")
+			if err := c.Recorder.SetState(ctx, m.ID, message.StateFiltered, ""); err != nil {
+				c.fail(ctx, m, fmt.Sprintf("recording filtered state: %v", err))
+				return storeFailure(err)
+			}
 			c.publishMessage(m.ID, message.StateFiltered, "")
 			return adapter.AckDecision{Code: "AA"}
 		}
@@ -332,11 +335,20 @@ func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDe
 		}
 	}
 	outType := c.transformedType(m)
-	if transformed, err := outType.Serialize(m.Tree); err == nil {
-		_ = c.Recorder.SetTransformed(ctx, m.ID, transformed, outType.Name())
+	transformed, err := outType.Serialize(m.Tree)
+	if err != nil {
+		c.fail(ctx, m, fmt.Sprintf("serialize (%s): %v", outType.Name(), err))
+		return adapter.AckDecision{Code: "AE", Text: err.Error()}
+	}
+	if err := c.Recorder.SetTransformed(ctx, m.ID, transformed, outType.Name()); err != nil {
+		c.fail(ctx, m, fmt.Sprintf("recording transformed payload: %v", err))
+		return storeFailure(err)
 	}
 	m.State = message.StateTransformed
-	_ = c.Recorder.SetState(ctx, m.ID, message.StateTransformed, "")
+	if err := c.Recorder.SetState(ctx, m.ID, message.StateTransformed, ""); err != nil {
+		c.fail(ctx, m, fmt.Sprintf("recording transformed state: %v", err))
+		return storeFailure(err)
+	}
 	c.publishMessage(m.ID, message.StateTransformed, "")
 
 	// Recipient List fan-out.
@@ -363,6 +375,13 @@ func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDe
 		}
 	}
 	return decision
+}
+
+// storeFailure is the ACK for a message whose outcome could not be
+// recorded. The engine no longer owns it durably, so the sender gets AE
+// (retry later), never AR.
+func storeFailure(err error) adapter.AckDecision {
+	return adapter.AckDecision{Code: "AE", Text: "persistence failure: " + err.Error()}
 }
 
 // decisionForError maps a pipeline error to the source ACK: script
@@ -393,32 +412,30 @@ func (c *Channel) sendTo(ctx context.Context, d *Destination, m *message.Message
 	if d.Filter != nil {
 		keep, err := d.Filter(dm)
 		if err != nil {
-			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, nil, nil, fmt.Sprintf("filter: %v", err))
-			c.publishDestination(m.ID, d.ID, message.StateError)
-			return fmt.Errorf("filter: %w", err)
+			return c.failDestination(ctx, m, d, nil, fmt.Errorf("filter: %w", err))
 		}
 		if !keep {
-			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateFiltered, nil, nil, "")
-			c.publishDestination(m.ID, d.ID, message.StateFiltered)
+			c.recordDestination(ctx, m, d, message.StateFiltered, nil, nil, "")
 			return nil
 		}
 	}
 	for i, translate := range d.Translate {
 		if err := translate(dm); err != nil {
-			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, nil, nil, fmt.Sprintf("translator %d: %v", i+1, err))
-			c.publishDestination(m.ID, d.ID, message.StateError)
-			return fmt.Errorf("translator %d: %w", i+1, err)
+			return c.failDestination(ctx, m, d, nil, fmt.Errorf("translator %d: %w", i+1, err))
 		}
 	}
 
 	payload, err := d.OutType.Serialize(dm.Tree)
 	if err != nil {
-		_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, nil, nil, fmt.Sprintf("serialize (%s): %v", d.OutType.Name(), err))
-		c.publishDestination(m.ID, d.ID, message.StateError)
-		return fmt.Errorf("serialize: %w", err)
+		return c.failDestination(ctx, m, d, nil, fmt.Errorf("serialize (%s): %w", d.OutType.Name(), err))
 	}
 
-	_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateQueued, payload, dm.Meta, "")
+	// The QUEUED record carries the payload the worker will send, so it
+	// must be durable before the queue row exists: a queue entry with no
+	// payload behind it is a delivery of nothing.
+	if err := c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateQueued, payload, dm.Meta, ""); err != nil {
+		return c.failDestination(ctx, m, d, payload, fmt.Errorf("recording delivery: %w", err))
+	}
 	c.publishDestination(m.ID, d.ID, message.StateQueued)
 
 	// Guaranteed Delivery: hand non-waitForAck deliveries to the queue
@@ -426,9 +443,7 @@ func (c *Channel) sendTo(ctx context.Context, d *Destination, m *message.Message
 	// upstream sender owns retry (their outcome drives the source ACK).
 	if c.Queue != nil && !d.WaitForAck {
 		if err := c.Queue.Enqueue(ctx, c.ID, d.ID, m.ID); err != nil {
-			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, payload, nil, err.Error())
-			c.publishDestination(m.ID, d.ID, message.StateError)
-			return fmt.Errorf("enqueue: %w", err)
+			return c.failDestination(ctx, m, d, payload, fmt.Errorf("enqueue: %w", err))
 		}
 		return nil
 	}
@@ -438,13 +453,30 @@ func (c *Channel) sendTo(ctx context.Context, d *Destination, m *message.Message
 	meta["channel.id"] = c.ID
 	meta["destination.id"] = d.ID
 	if err := d.Adapter.Send(ctx, payload, meta); err != nil {
-		_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, payload, nil, err.Error())
-		c.publishDestination(m.ID, d.ID, message.StateError)
-		return err
+		return c.failDestination(ctx, m, d, payload, err)
 	}
-	_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateSent, payload, nil, "")
-	c.publishDestination(m.ID, d.ID, message.StateSent)
+	c.recordDestination(ctx, m, d, message.StateSent, payload, nil, "")
 	return nil
+}
+
+// recordDestination writes one destination's state and publishes it. A
+// store failure here is logged rather than returned: the delivery outcome
+// is already decided (sent, filtered, or failed) and the caller has no
+// better recourse. The one state that must not be lost, QUEUED with its
+// payload, is written directly in sendTo and checked there.
+func (c *Channel) recordDestination(ctx context.Context, m *message.Message, d *Destination, state message.State, payload []byte, meta map[string]string, errText string) {
+	if err := c.Recorder.SetDestinationState(ctx, m.ID, d.ID, state, payload, meta, errText); err != nil {
+		c.Log.Error("recording destination state failed",
+			"channel", c.ID, "message", m.ID, "destination", d.ID, "state", state, "error", err)
+	}
+	c.publishDestination(m.ID, d.ID, state)
+}
+
+// failDestination records a destination-level failure and returns cause
+// unchanged, so callers can still classify it (Rejection, Permanent).
+func (c *Channel) failDestination(ctx context.Context, m *message.Message, d *Destination, payload []byte, cause error) error {
+	c.recordDestination(ctx, m, d, message.StateError, payload, nil, cause.Error())
+	return cause
 }
 
 // transformedType is the data type of the tree after the channel translator
@@ -461,7 +493,10 @@ func (c *Channel) transformedType(m *message.Message) format.DataType {
 func (c *Channel) fail(ctx context.Context, m *message.Message, errText string) {
 	m.State = message.StateError
 	m.Error = errText
-	_ = c.Recorder.SetState(ctx, m.ID, message.StateError, errText)
+	if err := c.Recorder.SetState(ctx, m.ID, message.StateError, errText); err != nil {
+		c.Log.Error("recording error state failed",
+			"channel", c.ID, "message", m.ID, "error", err)
+	}
 	c.publishMessage(m.ID, message.StateError, "")
 	c.Log.Error("message routed to invalid message channel",
 		"channel", c.ID, "message", m.ID, "error", errText)

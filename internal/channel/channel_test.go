@@ -89,6 +89,47 @@ func (r *recordingRecorder) history() []string {
 	return append([]string(nil), r.states...)
 }
 
+// failingRecorder fails one Recorder method to model a store outage
+// mid-pipeline.
+type failingRecorder struct {
+	recordingRecorder
+	failTransformed bool
+	failQueued      bool
+}
+
+func (r *failingRecorder) SetTransformed(ctx context.Context, id int64, payload []byte, dataType string) error {
+	if r.failTransformed {
+		return errors.New("disk full")
+	}
+	return r.recordingRecorder.SetTransformed(ctx, id, payload, dataType)
+}
+
+func (r *failingRecorder) SetDestinationState(ctx context.Context, id int64, destID string, state message.State, payload []byte, meta map[string]string, errText string) error {
+	if r.failQueued && state == message.StateQueued {
+		return errors.New("disk full")
+	}
+	return r.recordingRecorder.SetDestinationState(ctx, id, destID, state, payload, meta, errText)
+}
+
+// recordingQueuer counts Enqueue calls.
+type recordingQueuer struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (q *recordingQueuer) Enqueue(ctx context.Context, channelID, destID string, messageID int64) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.calls++
+	return nil
+}
+
+func (q *recordingQueuer) count() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.calls
+}
+
 func hl7Type() format.DataType {
 	dt, _ := format.Get("hl7v2")
 	return dt
@@ -306,6 +347,87 @@ func TestPipelineWaitForAckPermanentRejection(t *testing.T) {
 	d := deliverAndWait(t, src, sampleHL7)
 	if d.Code != "AR" {
 		t.Errorf("permanent rejection should surface as AR, got %+v", d)
+	}
+}
+
+// TestStoreFailureFailsTheMessage: a Recorder error mid-pipeline used to be
+// discarded, leaving the message marked TRANSFORMED with nothing stored.
+// It must route to the invalid message channel and answer AE.
+func TestStoreFailureFailsTheMessage(t *testing.T) {
+	rec := &failingRecorder{failTransformed: true}
+	out := &fakeOut{}
+	ch, src := newTestChannel(rec, &Destination{ID: "d1", OutType: hl7Type(), Adapter: out})
+	if err := ch.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer ch.Stop()
+
+	d := deliverAndWait(t, src, sampleHL7)
+	if d.Code != "AE" || !strings.Contains(d.Text, "persistence") {
+		t.Errorf("decision = %+v, want AE naming persistence", d)
+	}
+	if len(out.sent()) != 0 {
+		t.Error("nothing may be sent when the transformed record failed")
+	}
+	if got := rec.history(); !equalStrings(got, []string{"msg:ERROR"}) {
+		t.Errorf("history = %v", got)
+	}
+}
+
+// TestQueuedRecordFailureSkipsEnqueue: the worker sends whatever payload the
+// QUEUED record holds, so a queue row must never exist without one.
+func TestQueuedRecordFailureSkipsEnqueue(t *testing.T) {
+	rec := &failingRecorder{failQueued: true}
+	q := &recordingQueuer{}
+	out := &fakeOut{}
+	ch, src := newTestChannel(rec, &Destination{ID: "d1", OutType: hl7Type(), Adapter: out})
+	ch.Queue = q
+	if err := ch.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer ch.Stop()
+
+	d := deliverAndWait(t, src, sampleHL7)
+	if d.Code != "AA" {
+		// Non-waitForAck destinations never change the source ACK.
+		t.Errorf("decision = %+v", d)
+	}
+	if q.count() != 0 {
+		t.Fatal("Enqueue was called although the QUEUED record failed")
+	}
+	if len(out.sent()) != 0 {
+		t.Error("nothing may be sent inline for a queued destination")
+	}
+	history := strings.Join(rec.history(), " ")
+	if !strings.Contains(history, "dest:d1:ERROR") {
+		t.Errorf("destination failure not recorded: %v", rec.history())
+	}
+}
+
+// TestSerializeFailureFailsTheMessage: an unserializable tree after the
+// channel translators is an error, not a message silently marked
+// TRANSFORMED with no payload.
+func TestSerializeFailureFailsTheMessage(t *testing.T) {
+	rec := &recordingRecorder{}
+	out := &fakeOut{}
+	ch, src := newTestChannel(rec, &Destination{ID: "d1", OutType: hl7Type(), Adapter: out})
+	ch.Translate = []TranslateFunc{func(m *message.Message) error {
+		// A CSV tree declared as HL7: the HL7 serializer cannot render it.
+		m.Tree = &message.Node{Name: "csv", Children: []*message.Node{{Name: "R", Children: []*message.Node{{Name: "1", Value: "x"}}}}}
+		// DataType still says HL7, so the HL7 serializer gets a CSV tree.
+		return nil
+	}}
+	if err := ch.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer ch.Stop()
+
+	d := deliverAndWait(t, src, sampleHL7)
+	if d.Code != "AE" {
+		t.Errorf("decision = %+v", d)
+	}
+	if got := rec.history(); !equalStrings(got, []string{"msg:ERROR"}) {
+		t.Errorf("history = %v", got)
 	}
 }
 

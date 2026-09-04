@@ -86,6 +86,18 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 func (w *Worker) attempt(ctx context.Context, log *slog.Logger, item *store.QueueItem) {
+	if item.Orphaned {
+		// A queue row with no payload behind it: the pipeline's QUEUED
+		// record never landed. Sending empty bytes would be worse than
+		// nothing, so dead-letter it where an operator can see it.
+		log.Error("queued delivery has no recorded payload, dead-lettering", "message", item.MessageID)
+		if err := w.Store.DeadLetter(ctx, item, w.DestID, "no payload recorded for this delivery"); err != nil {
+			log.Error("dead-lettering", "message", item.MessageID, "error", err)
+			return
+		}
+		w.publish(item.MessageID, message.StateError)
+		return
+	}
 	meta := make(map[string]string, len(item.Meta)+3)
 	for k, v := range item.Meta {
 		meta[k] = v

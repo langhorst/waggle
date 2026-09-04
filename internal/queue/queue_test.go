@@ -214,6 +214,35 @@ func TestWorkerExhaustsRetriesThenDeadLetters(t *testing.T) {
 	})
 }
 
+// TestWorkerDeadLettersOrphanedDelivery: a queue row whose QUEUED record
+// never landed has no payload to send. The worker used to send empty
+// bytes; it must dead-letter instead.
+func TestWorkerDeadLettersOrphanedDelivery(t *testing.T) {
+	s := setup(t)
+	ctx := context.Background()
+	m := &message.Message{
+		ChannelID: "c1", CorrelationID: "x", Raw: []byte("raw"),
+		DataType: "hl7v2", State: message.StateReceived, ReceivedAt: time.Now(),
+	}
+	if err := s.Record(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	// Enqueue without SetDestinationState: the orphan shape.
+	if err := s.Enqueue(ctx, "c1", "d1", m.ID); err != nil {
+		t.Fatal(err)
+	}
+	a := &scriptedAdapter{}
+	runWorker(t, &Worker{Store: s, Adapter: a, ChannelID: "c1", DestID: "d1", PollInterval: 5 * time.Millisecond, Log: slog.New(slog.DiscardHandler)})
+
+	waitFor(t, "queue to drain", func() bool {
+		depth, _ := s.QueueDepth(ctx, "c1")
+		return depth["d1"] == 0
+	})
+	if got := a.deliveredList(); len(got) != 0 {
+		t.Fatalf("orphaned delivery was sent: %q", got)
+	}
+}
+
 func TestBackoffSchedule(t *testing.T) {
 	w := &Worker{BaseInterval: time.Second, CapInterval: 5 * time.Minute, MaxAttempts: -1, PollInterval: time.Second}
 	for attempt, want := range map[int]time.Duration{

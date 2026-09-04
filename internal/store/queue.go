@@ -21,6 +21,10 @@ type QueueItem struct {
 	Meta      map[string]string
 	Attempts  int
 	NotBefore time.Time
+	// Orphaned marks a queue row with no recorded payload behind it (the
+	// destination record is missing or its payload is NULL). There is
+	// nothing to send; the worker dead-letters it.
+	Orphaned bool
 }
 
 // Enqueue adds a pending delivery for (channel, destination, message). The
@@ -40,7 +44,7 @@ func (s *Store) Enqueue(ctx context.Context, channelID, destID string, messageID
 // caller must respect NotBefore), or nil when the queue is empty.
 func (s *Store) Head(ctx context.Context, channelID, destID string) (*QueueItem, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT q.id, q.message_id, q.not_before, COALESCE(d.payload, x'') , COALESCE(d.meta, ''), COALESCE(d.attempts, 0)
+		SELECT q.id, q.message_id, q.not_before, COALESCE(d.payload, x''), d.payload IS NULL, COALESCE(d.meta, ''), COALESCE(d.attempts, 0)
 		FROM destination_queue q
 		LEFT JOIN message_destinations d ON d.message_id = q.message_id AND d.destination_id = q.destination_id
 		WHERE q.channel_id = ? AND q.destination_id = ?
@@ -48,7 +52,7 @@ func (s *Store) Head(ctx context.Context, channelID, destID string) (*QueueItem,
 	var item QueueItem
 	var notBefore int64
 	var metaJSON string
-	if err := row.Scan(&item.QueueID, &item.MessageID, &notBefore, &item.Payload, &metaJSON, &item.Attempts); err != nil {
+	if err := row.Scan(&item.QueueID, &item.MessageID, &notBefore, &item.Payload, &item.Orphaned, &metaJSON, &item.Attempts); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
