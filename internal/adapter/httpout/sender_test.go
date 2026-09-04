@@ -159,6 +159,59 @@ func TestInvalidMetaPathIsPermanent(t *testing.T) {
 	}
 }
 
+// TestMetaPathCannotChangeHost: the outbound host is set by the operator
+// in YAML; a script's http.path must never redirect the request elsewhere.
+func TestMetaPathCannotChangeHost(t *testing.T) {
+	status := 200
+	ts, got := startServer(t, &status)
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("request reached the wrong host: %s %s", r.Method, r.URL)
+	}))
+	t.Cleanup(elsewhere.Close)
+	s := newSender(t, map[string]any{"url": ts.URL + "/fhir/"})
+
+	for _, p := range []string{
+		elsewhere.URL + "/x",
+		"//" + strings.TrimPrefix(elsewhere.URL, "http://") + "/x",
+		"https://evil.example/x",
+		"http://user:pw@" + strings.TrimPrefix(elsewhere.URL, "http://") + "/x",
+	} {
+		err := s.Send(context.Background(), []byte("x"), map[string]string{MetaPath: p})
+		if err == nil || !adapter.IsPermanent(err) {
+			t.Errorf("%q: want permanent rejection, got %v", p, err)
+		}
+	}
+	if got.path != "" {
+		t.Errorf("a rejected path still produced a request: %q", got.path)
+	}
+
+	// Plain paths keep working, both relative and absolute.
+	if err := s.Send(context.Background(), []byte("x"), map[string]string{MetaPath: "Patient/1?x=1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got.path != "/fhir/Patient/1" || got.query != "x=1" {
+		t.Errorf("relative path routed to %q?%q", got.path, got.query)
+	}
+}
+
+func TestSuccessBodyDrainIsBounded(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		// Far more than maxDrainBytes; Send must return promptly regardless.
+		chunk := strings.Repeat("x", 64<<10)
+		for i := 0; i < 64; i++ {
+			if _, err := io.WriteString(w, chunk); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(ts.Close)
+	s := newSender(t, map[string]any{"url": ts.URL})
+	if err := s.Send(context.Background(), []byte("x"), nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTLSWithCAFile(t *testing.T) {
 	status := 200
 	var mu sync.Mutex

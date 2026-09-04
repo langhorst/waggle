@@ -8,7 +8,8 @@
 // Transformer scripts route per message through meta: meta['http.method']
 // overrides the configured method and meta['http.path'] is resolved against
 // the configured URL (absolute paths replace, relative paths append, query
-// strings carry over).
+// strings carry over). The path may not carry a scheme or host: the
+// destination host is the operator's decision in YAML, never a script's.
 package httpout
 
 import (
@@ -38,6 +39,10 @@ const (
 	MetaMethod = "http.method"
 	MetaPath   = "http.path"
 )
+
+// maxDrainBytes bounds how much of a successful response body is read
+// before the connection is released.
+const maxDrainBytes = 1 << 20
 
 // SenderConfig configures the HTTP sender.
 type SenderConfig struct {
@@ -119,6 +124,9 @@ func (s *Sender) Send(ctx context.Context, payload []byte, meta map[string]strin
 			// A script wrote an unparseable path; retrying cannot fix it.
 			return adapter.Permanent(fmt.Errorf("http-sender: invalid %s %q: %w", MetaPath, p, err))
 		}
+		if ref.Scheme != "" || ref.Host != "" || ref.User != nil || strings.HasPrefix(p, "//") {
+			return adapter.Permanent(fmt.Errorf("http-sender: %s %q must be a path, not a URL", MetaPath, p))
+		}
 		target = s.base.ResolveReference(ref)
 	}
 	method := s.cfg.Method
@@ -144,7 +152,9 @@ func (s *Sender) Send(ctx context.Context, payload []byte, meta map[string]strin
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		_, _ = io.Copy(io.Discard, resp.Body) // drain for connection reuse
+		// Drain (bounded) so the connection can be reused; a response
+		// larger than this is not worth reading for that.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
 		return nil
 	}
 
