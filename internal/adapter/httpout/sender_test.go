@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/langhorst/waggle/internal/adapter"
+	metakey "github.com/langhorst/waggle/internal/meta"
 )
 
 type captured struct {
@@ -191,6 +192,27 @@ func TestMetaPathCannotChangeHost(t *testing.T) {
 	}
 	if got.path != "/fhir/Patient/1" || got.query != "x=1" {
 		t.Errorf("relative path routed to %q?%q", got.path, got.query)
+	}
+}
+
+// TestInboundMetaDoesNotRoute: an http-listener stamps the inbound request's
+// path and method on the message. Those keys used to be the same ones the
+// sender reads as overrides, so a listener-to-sender channel replayed the
+// inbound path against the outbound base URL.
+func TestInboundMetaDoesNotRoute(t *testing.T) {
+	status := 200
+	ts, got := startServer(t, &status)
+	s := newSender(t, map[string]any{"url": ts.URL + "/fhir/Patient", "method": "POST"})
+	inbound := map[string]string{
+		metakey.SourceHTTPMethod: "PUT",
+		metakey.SourceHTTPPath:   "/intake",
+		metakey.SourceRemote:     "10.0.0.1:1234",
+	}
+	if err := s.Send(context.Background(), []byte("x"), inbound); err != nil {
+		t.Fatal(err)
+	}
+	if got.method != "POST" || got.path != "/fhir/Patient" {
+		t.Fatalf("inbound meta rerouted the request to %s %s", got.method, got.path)
 	}
 }
 

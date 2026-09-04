@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/langhorst/waggle/internal/adapter"
+	metakey "github.com/langhorst/waggle/internal/meta"
 )
 
 func init() {
@@ -156,7 +157,7 @@ func (l *Listener) Stop() error {
 
 func (l *Listener) serve(ctx context.Context, conn net.Conn, deliver adapter.DeliverFunc) {
 	br := bufio.NewReader(conn)
-	meta := map[string]string{"source.remote": conn.RemoteAddr().String()}
+	meta := map[string]string{metakey.SourceRemote: conn.RemoteAddr().String()}
 	for ctx.Err() == nil {
 		raw, err := readFrame(br, l.cfg.MaxMessageSize)
 		if err != nil {

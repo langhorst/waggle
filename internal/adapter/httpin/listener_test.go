@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,9 +95,9 @@ func TestImmediateMode(t *testing.T) {
 		t.Errorf("raw = %q", gotRaw)
 	}
 	for k, want := range map[string]string{
-		"http.method": "POST", "http.path": "/intake",
-		"http.query.src": "lab", "http.query.x": "1",
-		"http.header.content-type": "application/json",
+		"source.http.method": "POST", "source.http.path": "/intake",
+		"source.http.query.src": "lab", "source.http.query.x": "1",
+		"source.http.header.content-type": "application/json",
 	} {
 		if gotMeta[k] != want {
 			t.Errorf("meta[%s] = %q, want %q", k, gotMeta[k], want)
@@ -104,6 +105,12 @@ func TestImmediateMode(t *testing.T) {
 	}
 	if gotMeta["source.remote"] == "" {
 		t.Error("missing source.remote")
+	}
+	// Inbound context must never look like an http-sender routing hint.
+	for k := range gotMeta {
+		if !strings.HasPrefix(k, "source.") {
+			t.Errorf("inbound meta key %q is outside the source.* namespace", k)
+		}
 	}
 }
 

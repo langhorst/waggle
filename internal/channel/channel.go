@@ -25,6 +25,7 @@ import (
 	"github.com/langhorst/waggle/internal/events"
 	"github.com/langhorst/waggle/internal/format"
 	"github.com/langhorst/waggle/internal/message"
+	metakey "github.com/langhorst/waggle/internal/meta"
 )
 
 // Status is a channel's lifecycle state.
@@ -541,9 +542,9 @@ func (c *Channel) sendTo(ctx context.Context, d *Destination, m *message.Message
 	}
 
 	meta := copyMeta(dm.Meta)
-	meta["message.id"] = fmt.Sprintf("%d", m.ID)
-	meta["channel.id"] = c.ID
-	meta["destination.id"] = d.ID
+	meta[metakey.MessageID] = fmt.Sprintf("%d", m.ID)
+	meta[metakey.ChannelID] = c.ID
+	meta[metakey.DestinationID] = d.ID
 	if err := d.Adapter.Send(ctx, payload, meta); err != nil {
 		return c.failDestination(ctx, m, d, payload, err)
 	}

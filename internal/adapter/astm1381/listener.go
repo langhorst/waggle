@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/langhorst/waggle/internal/adapter"
+	metakey "github.com/langhorst/waggle/internal/meta"
 )
 
 func init() {
@@ -161,7 +162,7 @@ type session struct {
 
 func (l *Listener) serve(ctx context.Context, conn net.Conn, deliver adapter.DeliverFunc) {
 	br := bufio.NewReader(conn)
-	meta := map[string]string{"source.remote": conn.RemoteAddr().String()}
+	meta := map[string]string{metakey.SourceRemote: conn.RemoteAddr().String()}
 	s := &session{}
 
 	for ctx.Err() == nil {

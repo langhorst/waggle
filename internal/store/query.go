@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/langhorst/waggle/internal/message"
+	metakey "github.com/langhorst/waggle/internal/meta"
 )
 
 // MessageSummary is one row of the message list.
@@ -272,6 +273,6 @@ func (s *Store) NewReplay(ctx context.Context, originalID int64) (*message.Messa
 		DataType:      orig.DataType,
 		State:         message.StateReceived,
 		ReceivedAt:    time.Now(),
-		Meta:          map[string]string{"replay.of": fmt.Sprintf("%d", originalID)},
+		Meta:          map[string]string{metakey.ReplayOf: fmt.Sprintf("%d", originalID)},
 	}, nil
 }

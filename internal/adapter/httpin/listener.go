@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/langhorst/waggle/internal/adapter"
+	metakey "github.com/langhorst/waggle/internal/meta"
 )
 
 func init() {
@@ -207,17 +208,19 @@ func (l *Listener) handle(ctx context.Context, w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Everything the listener knows about the request goes under source.*
+	// so it can never be mistaken for an http-sender routing hint.
 	meta := map[string]string{
-		"source.remote": r.RemoteAddr,
-		"http.method":   r.Method,
-		"http.path":     r.URL.Path,
+		metakey.SourceRemote:     r.RemoteAddr,
+		metakey.SourceHTTPMethod: r.Method,
+		metakey.SourceHTTPPath:   r.URL.Path,
 	}
 	if ct := r.Header.Get("Content-Type"); ct != "" {
-		meta["http.header.content-type"] = ct
+		meta[metakey.SourceHTTPContentType] = ct
 	}
 	for name, vals := range r.URL.Query() {
 		if len(vals) > 0 {
-			meta["http.query."+name] = vals[0]
+			meta[metakey.SourceHTTPQueryPrefix+name] = vals[0]
 		}
 	}
 

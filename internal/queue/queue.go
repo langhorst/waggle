@@ -15,6 +15,7 @@ import (
 	"github.com/langhorst/waggle/internal/adapter"
 	"github.com/langhorst/waggle/internal/events"
 	"github.com/langhorst/waggle/internal/message"
+	metakey "github.com/langhorst/waggle/internal/meta"
 	"github.com/langhorst/waggle/internal/store"
 )
 
@@ -102,9 +103,9 @@ func (w *Worker) attempt(ctx context.Context, log *slog.Logger, item *store.Queu
 	for k, v := range item.Meta {
 		meta[k] = v
 	}
-	meta["message.id"] = fmt.Sprintf("%d", item.MessageID)
-	meta["channel.id"] = w.ChannelID
-	meta["destination.id"] = w.DestID
+	meta[metakey.MessageID] = fmt.Sprintf("%d", item.MessageID)
+	meta[metakey.ChannelID] = w.ChannelID
+	meta[metakey.DestinationID] = w.DestID
 	err := w.Adapter.Send(ctx, item.Payload, meta)
 	switch {
 	case err == nil:

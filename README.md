@@ -142,7 +142,10 @@ for the pipeline outcome (AA→200, AR→400, AE→500, hold timeout→504), so 
 the caller. `http-sender` makes Waggle an API client: YAML sets the url,
 method, content type, static headers (Authorization etc.), basic auth, and
 an optional private CA; scripts override per message with
-`meta['http.path']` and `meta['http.method']`. Failure classification
+`meta['http.path']` and `meta['http.method']`; what the listener knew
+about the inbound request lives under `meta['source.http.*']` (path,
+method, query parameters, content type), a separate namespace so a
+listener-to-sender channel never replays the inbound path. Failure classification
 drives Guaranteed Delivery — network errors, 408, 429, and 5xx retry with
 backoff; any other non-2xx is an application rejection that dead-letters
 immediately with the API's response body in the error text.

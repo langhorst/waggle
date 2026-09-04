@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/langhorst/waggle/internal/adapter"
+	metakey "github.com/langhorst/waggle/internal/meta"
 )
 
 func init() {
@@ -149,7 +150,7 @@ func (r *Reader) poll(ctx context.Context, deliver adapter.DeliverFunc) {
 		if err != nil {
 			continue
 		}
-		meta := map[string]string{"source.file": name}
+		meta := map[string]string{metakey.SourceFile: name}
 		if _, err := deliver(ctx, raw, meta); err != nil {
 			moveTo(path, r.cfg.ErrorDir, name)
 			continue

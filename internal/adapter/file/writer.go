@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/langhorst/waggle/internal/adapter"
+	metakey "github.com/langhorst/waggle/internal/meta"
 )
 
 // WriterConfig configures the file writer destination. Pattern names the
@@ -51,9 +52,9 @@ func (w *Writer) Close() error { return nil }
 func (w *Writer) Send(ctx context.Context, payload []byte, meta map[string]string) error {
 	name := w.cfg.Pattern
 	name = strings.ReplaceAll(name, "{ts}", time.Now().UTC().Format("20060102T150405.000000000"))
-	name = strings.ReplaceAll(name, "{id}", meta["message.id"])
-	name = strings.ReplaceAll(name, "{channel}", meta["channel.id"])
-	name = strings.ReplaceAll(name, "{dest}", meta["destination.id"])
+	name = strings.ReplaceAll(name, "{id}", meta[metakey.MessageID])
+	name = strings.ReplaceAll(name, "{channel}", meta[metakey.ChannelID])
+	name = strings.ReplaceAll(name, "{dest}", meta[metakey.DestinationID])
 
 	target := filepath.Join(w.cfg.Dir, name)
 	for i := 1; ; i++ {

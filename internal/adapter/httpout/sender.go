@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/langhorst/waggle/internal/adapter"
+	metakey "github.com/langhorst/waggle/internal/meta"
 )
 
 func init() {
@@ -36,8 +37,8 @@ func init() {
 
 // Meta keys scripts set to route a single message.
 const (
-	MetaMethod = "http.method"
-	MetaPath   = "http.path"
+	MetaMethod = metakey.HTTPMethod
+	MetaPath   = metakey.HTTPPath
 )
 
 // maxDrainBytes bounds how much of a successful response body is read
