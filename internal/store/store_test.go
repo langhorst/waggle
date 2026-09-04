@@ -303,3 +303,74 @@ func TestMessageCounts(t *testing.T) {
 		t.Errorf("counts = %v, %v", counts, err)
 	}
 }
+
+// TestEnqueueWakesWorkerChannel: Enqueue and Requeue signal the queue's
+// wake channel so a worker need not poll.
+func TestEnqueueWakesWorkerChannel(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	wake := s.Wake("c1", "d1")
+	select {
+	case <-wake:
+		t.Fatal("wake signalled before any enqueue")
+	default:
+	}
+	m := &message.Message{ChannelID: "c1", CorrelationID: "x", Raw: []byte("raw"), DataType: "hl7v2", State: message.StateReceived, ReceivedAt: time.Now()}
+	if err := s.Record(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDestinationState(ctx, m.ID, "d1", message.StateQueued, []byte("p"), nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Enqueue(ctx, "c1", "d1", m.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-wake:
+	case <-time.After(time.Second):
+		t.Fatal("Enqueue did not signal the wake channel")
+	}
+	// A second pending delivery for the same message is refused by the
+	// unique index rather than silently duplicated.
+	if err := s.Enqueue(ctx, "c1", "d1", m.ID); err == nil {
+		t.Fatal("duplicate enqueue accepted")
+	}
+	// Another destination has its own wake channel.
+	select {
+	case <-s.Wake("c1", "d2"):
+		t.Fatal("wrong queue woken")
+	default:
+	}
+}
+
+// TestReadsRunAlongsideWrites: a read on the pool is not blocked by an
+// open write transaction on the writer connection (WAL mode).
+func TestReadsRunAlongsideWrites(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	m := &message.Message{ChannelID: "c1", CorrelationID: "x", Raw: []byte("raw"), DataType: "hl7v2", State: message.StateReceived, ReceivedAt: time.Now()}
+	if err := s.Record(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET state = 'TRANSFORMED' WHERE id = ?`, m.ID); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.ListMessages(ctx, "c1", ListQuery{})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("read blocked behind an open write transaction")
+	}
+}

@@ -321,3 +321,19 @@ func TestWorkerPassesStoredMeta(t *testing.T) {
 		t.Errorf("worker identity keys missing: %v", got)
 	}
 }
+
+// TestWorkerWakesOnEnqueue: with a long poll interval, a delivery enqueued
+// after the worker went idle is still sent promptly because Enqueue wakes
+// the worker.
+func TestWorkerWakesOnEnqueue(t *testing.T) {
+	s := setup(t)
+	a := &scriptedAdapter{}
+	runWorker(t, &Worker{Store: s, Adapter: a, ChannelID: "c1", DestID: "d1", PollInterval: 30 * time.Second, Log: slog.New(slog.DiscardHandler)})
+	time.Sleep(50 * time.Millisecond) // let the worker find the empty queue and go idle
+	start := time.Now()
+	enqueue(t, s, "c1", "d1", "wake-me")
+	waitFor(t, "delivery", func() bool { return len(a.deliveredList()) == 1 })
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("delivery took %v; the worker was not woken", time.Since(start))
+	}
+}

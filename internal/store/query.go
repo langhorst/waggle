@@ -73,7 +73,7 @@ func (s *Store) ListMessages(ctx context.Context, channelID string, q ListQuery)
 	query += ` ORDER BY id DESC LIMIT ?`
 	args = append(args, q.Limit)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.reads.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list messages: %w", err)
 	}
@@ -109,7 +109,7 @@ var ErrNotFound = errors.New("store: message not found")
 // GetMessage loads one message with raw/transformed payloads and all
 // destination outcomes.
 func (s *Store) GetMessage(ctx context.Context, id int64) (*MessageDetail, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.reads.QueryRowContext(ctx, `
 		SELECT id, channel_id, correlation_id, COALESCE(replay_of, 0), state, data_type, error_text, received_at, updated_at,
 		       raw, COALESCE(transformed, x''), transformed_data_type, meta_json
 		FROM messages WHERE id = ?`, id)
@@ -127,7 +127,7 @@ func (s *Store) GetMessage(ctx context.Context, id int64) (*MessageDetail, error
 	d.UpdatedAt = time.UnixMilli(updated)
 	_ = json.Unmarshal([]byte(metaJSON), &d.Meta)
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.reads.QueryContext(ctx, `
 		SELECT destination_id, state, attempts, last_error, dead_letter, queued_at, sent_at
 		FROM message_destinations WHERE message_id = ? ORDER BY destination_id`, id)
 	if err != nil {
@@ -160,7 +160,7 @@ func (s *Store) GetMessage(ctx context.Context, id int64) (*MessageDetail, error
 // message/destination pair.
 func (s *Store) DestinationPayload(ctx context.Context, id int64, destID string) ([]byte, error) {
 	var payload []byte
-	err := s.db.QueryRowContext(ctx,
+	err := s.reads.QueryRowContext(ctx,
 		`SELECT COALESCE(payload, x'') FROM message_destinations WHERE message_id = ? AND destination_id = ?`,
 		id, destID).Scan(&payload)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -184,7 +184,7 @@ func (s *Store) DeadLetters(ctx context.Context, channelID string, limit int) ([
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.reads.QueryContext(ctx, `
 		SELECT m.id, m.channel_id, m.correlation_id, COALESCE(m.replay_of, 0), m.state, m.data_type, m.error_text, m.received_at, m.updated_at,
 		       d.destination_id, d.state, d.attempts, d.last_error
 		FROM message_destinations d
@@ -217,7 +217,7 @@ func (s *Store) DeadLetters(ctx context.Context, channelID string, limit int) ([
 // per-destination outcomes (a message's pipeline state stops at TRANSFORMED
 // — delivery success and dead-lettering are recorded per destination).
 func (s *Store) MessageCounts(ctx context.Context, channelID string) (map[message.State]int, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.reads.QueryContext(ctx,
 		`SELECT state, COUNT(*) FROM messages WHERE channel_id = ? GROUP BY state`, channelID)
 	if err != nil {
 		return nil, fmt.Errorf("store: counts: %w", err)
@@ -236,7 +236,7 @@ func (s *Store) MessageCounts(ctx context.Context, channelID string) (map[messag
 		return nil, err
 	}
 
-	destRows, err := s.db.QueryContext(ctx, `
+	destRows, err := s.reads.QueryContext(ctx, `
 		SELECT d.state, COUNT(*)
 		FROM message_destinations d
 		JOIN messages m ON m.id = d.message_id

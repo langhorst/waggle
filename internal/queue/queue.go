@@ -34,7 +34,9 @@ type Worker struct {
 	// ±20% jitter) up to CapInterval.
 	BaseInterval time.Duration
 	CapInterval  time.Duration
-	// PollInterval is the idle sleep between queue checks.
+	// PollInterval is the fallback sleep between queue checks. Enqueue
+	// wakes the worker directly, so polling only covers retry deadlines
+	// (not_before) and belt-and-braces. Default 1s.
 	PollInterval time.Duration
 
 	Bus *events.Bus
@@ -49,7 +51,7 @@ func (w *Worker) defaults() {
 		w.CapInterval = 5 * time.Minute
 	}
 	if w.PollInterval <= 0 {
-		w.PollInterval = 250 * time.Millisecond
+		w.PollInterval = time.Second
 	}
 	if w.MaxAttempts == 0 {
 		w.MaxAttempts = 10
@@ -63,26 +65,39 @@ func (w *Worker) defaults() {
 func (w *Worker) Run(ctx context.Context) {
 	w.defaults()
 	log := w.Log.With("channel", w.ChannelID, "destination", w.DestID)
+	wake := w.Store.Wake(w.ChannelID, w.DestID)
 	for ctx.Err() == nil {
 		item, err := w.Store.Head(ctx, w.ChannelID, w.DestID)
 		if err != nil {
 			if ctx.Err() == nil {
 				log.Error("reading queue head", "error", err)
 			}
-			sleepCtx(ctx, w.PollInterval)
+			w.idle(ctx, wake, w.PollInterval)
 			continue
 		}
 		if item == nil {
-			sleepCtx(ctx, w.PollInterval)
+			w.idle(ctx, wake, w.PollInterval)
 			continue
 		}
-		// FIFO: if the head is backing off, wait for it — never deliver a
+		// FIFO: if the head is backing off, wait for it: never deliver a
 		// newer message ahead of an older one.
 		if wait := time.Until(item.NotBefore); wait > 0 {
-			sleepCtx(ctx, minDuration(wait, w.PollInterval))
+			w.idle(ctx, wake, minDuration(wait, w.PollInterval))
 			continue
 		}
 		w.attempt(ctx, log, item)
+	}
+}
+
+// idle waits for new work, the poll interval, or shutdown, whichever
+// comes first.
+func (w *Worker) idle(ctx context.Context, wake <-chan struct{}, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-wake:
+	case <-t.C:
 	}
 }
 
@@ -172,15 +187,6 @@ func (w *Worker) publish(messageID int64, state message.State) {
 		State:         state,
 		DestinationID: w.DestID,
 	})
-}
-
-func sleepCtx(ctx context.Context, d time.Duration) {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-	case <-t.C:
-	}
 }
 
 func minDuration(a, b time.Duration) time.Duration {
