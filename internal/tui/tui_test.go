@@ -140,17 +140,50 @@ func key(s string) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 }
 
+// drive feeds msg to the model and runs every load command it provokes to
+// completion, so tests observe the settled state a real program reaches
+// once its commands return.
+func drive(t *testing.T, m Model, msg tea.Msg) Model {
+	t.Helper()
+	next, cmd := m.update(msg)
+	return runCmds(t, next, cmd)
+}
+
+func runCmds(t *testing.T, m Model, cmd tea.Cmd) Model {
+	t.Helper()
+	if cmd == nil {
+		return m
+	}
+	msg := cmd()
+	if msg == nil {
+		return m
+	}
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			m = runCmds(t, m, c)
+		}
+		return m
+	}
+	return drive(t, m, msg)
+}
+
+// newModel builds a model with its initial channel list loaded.
+func newModel(t *testing.T, b Backend) Model {
+	t.Helper()
+	m := New(b)
+	return runCmds(t, m, m.loadChannels())
+}
+
 func press(t *testing.T, m Model, keys ...string) Model {
 	t.Helper()
-	var mod tea.Model = m
 	for _, k := range keys {
-		mod, _ = mod.Update(key(k))
+		m = drive(t, m, key(k))
 	}
-	return mod.(Model)
+	return m
 }
 
 func TestChannelListView(t *testing.T) {
-	m := New(newFake())
+	m := newModel(t, newFake())
 	v := m.View()
 	for _, want := range []string{"adt-feed", "ADT Feed", "STARTED", "lab-feed", "STOPPED"} {
 		if !strings.Contains(v, want) {
@@ -160,7 +193,7 @@ func TestChannelListView(t *testing.T) {
 }
 
 func TestNavigateToMessages(t *testing.T) {
-	m := press(t, New(newFake()), "enter") // open first channel
+	m := press(t, newModel(t, newFake()), "enter") // open first channel
 	v := m.View()
 	for _, want := range []string{"channel adt-feed", "TRANSFORMED", "ERROR", "parse failed"} {
 		if !strings.Contains(v, want) {
@@ -182,7 +215,7 @@ func TestNavigateToMessages(t *testing.T) {
 
 func TestMessageDetailTabs(t *testing.T) {
 	// enter channel, move cursor to message #1 (second row), open it.
-	m := press(t, New(newFake()), "enter", "down", "enter")
+	m := press(t, newModel(t, newFake()), "enter", "down", "enter")
 	if m.view != viewDetail {
 		t.Fatalf("view = %d", m.view)
 	}
@@ -226,7 +259,7 @@ func TestMessageDetailTabs(t *testing.T) {
 
 func TestEventRefreshesMessageList(t *testing.T) {
 	f := newFake()
-	m := press(t, New(f), "enter")
+	m := press(t, newModel(t, f), "enter")
 	if len(m.messages) != 2 {
 		t.Fatalf("messages = %d", len(m.messages))
 	}
@@ -236,10 +269,9 @@ func TestEventRefreshesMessageList(t *testing.T) {
 		{ID: 3, ChannelID: "adt-feed", State: message.StateReceived, ReceivedAt: now},
 	}, f.messages["adt-feed"]...)
 
-	mod, _ := m.Update(eventMsg{events.Event{
+	m = drive(t, m, eventMsg{events.Event{
 		Type: events.TypeMessage, ChannelID: "adt-feed", MessageID: 3, State: message.StateReceived,
 	}})
-	m = mod.(Model)
 	if len(m.messages) != 3 {
 		t.Errorf("event should refresh the list, have %d messages", len(m.messages))
 	}

@@ -25,7 +25,7 @@ release: ## Build a stripped, trimmed release binary
 run: build ## Run the daemon against the examples/ configuration
 	cd examples && ../$(BIN) daemon
 
-tui: build ## Run the observer TUI against the examples/ configuration
+tui: build ## Attach the observer TUI to the daemon started by make run
 	cd examples && ../$(BIN) tui
 
 test: ## Run all tests

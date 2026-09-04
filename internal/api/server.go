@@ -65,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/status", s.handleStatus)
 	mux.HandleFunc("GET /api/channels", s.handleChannels)
+	mux.HandleFunc("GET /api/channels/{id}", s.handleChannel)
 	mux.HandleFunc("POST /api/channels/{id}/start", s.lifecycle("start"))
 	mux.HandleFunc("POST /api/channels/{id}/stop", s.lifecycle("stop"))
 	mux.HandleFunc("POST /api/channels/{id}/pause", s.lifecycle("pause"))
@@ -168,6 +169,15 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 	out, err := s.Eng.ChannelSummaries(r.Context())
 	if err != nil {
 		s.writeStoreError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleChannel(w http.ResponseWriter, r *http.Request) {
+	out, err := s.Eng.ChannelSummary(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.writeEngineError(w, err)
 		return
 	}
 	s.writeJSON(w, http.StatusOK, out)

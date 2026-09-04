@@ -23,7 +23,7 @@ of outbound Channel Adapters with **Guaranteed Delivery**.
 
 ```sh
 make run    # build + run the daemon on the examples/ config — web UI on http://localhost:8420
-make tui    # or attach the read-only observer TUI (engine runs in-process)
+make tui    # attach the read-only observer TUI to that daemon (in another terminal)
 ```
 
 (Or without make: `go build -o bin/waggle ./cmd/waggle`, then run
@@ -236,8 +236,9 @@ POST   /api/messages/{id}/replay[?destination={destID}]
 ```
 
 The web UI (HTMX + Flowbite, embedded and offline) is served at `/` and is
-the full-control surface; the TUI is a read-only observer that embeds the
-engine directly.
+the full-control surface; the TUI (`waggle tui [-addr host:port] [-token
+…]`) is a read-only observer that attaches to a running daemon over the
+same API and event stream.
 
 ## Configuration
 
