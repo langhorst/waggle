@@ -1,14 +1,13 @@
 package mllp
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"net"
 	"sync"
 	"time"
 
 	"github.com/langhorst/waggle/internal/adapter"
+	"github.com/langhorst/waggle/internal/adapter/tcp"
 )
 
 // SenderConfig configures the MLLP sender.
@@ -23,20 +22,20 @@ type SenderConfig struct {
 // Sender is the MLLP outbound Channel Adapter. It keeps one persistent
 // connection, reconnecting on demand. Send blocks for the receiving system's
 // ACK: AA/CA succeed, AE/AR/CE/CR return a Permanent error (application
-// rejection → Dead Letter Channel), and transport failures return transient
-// errors for the retry machinery.
+// rejection, straight to the Dead Letter Channel), and transport failures
+// return transient errors for the retry machinery.
 type Sender struct {
 	cfg SenderConfig
 
 	mu   sync.Mutex
-	conn net.Conn
-	br   *bufio.Reader
+	conn tcp.Client
 }
 
 func NewSender(settings map[string]any) (*Sender, error) {
 	cfg := SenderConfig{
 		ConnectTimeout: adapter.Duration(10 * time.Second),
 		AckTimeout:     adapter.Duration(30 * time.Second),
+		WriteTimeout:   adapter.Duration(10 * time.Second),
 		MaxAckSize:     1 << 20,
 	}
 	if err := adapter.DecodeSettings(settings, &cfg); err != nil {
@@ -57,7 +56,14 @@ func NewSender(settings map[string]any) (*Sender, error) {
 	if cfg.MaxAckSize <= 0 {
 		cfg.MaxAckSize = 1 << 20
 	}
-	return &Sender{cfg: cfg}, nil
+	return &Sender{
+		cfg: cfg,
+		conn: tcp.Client{
+			Addr:           cfg.Addr,
+			ConnectTimeout: time.Duration(cfg.ConnectTimeout),
+			WriteTimeout:   time.Duration(cfg.WriteTimeout),
+		},
+	}, nil
 }
 
 // Open is intentionally lazy: the connection is established on first Send so
@@ -68,82 +74,34 @@ func (s *Sender) Open(ctx context.Context) error { return nil }
 func (s *Sender) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.dropConnLocked()
-	return nil
-}
-
-func (s *Sender) dropConnLocked() {
-	if s.conn != nil {
-		s.conn.Close()
-		s.conn = nil
-		s.br = nil
-	}
-}
-
-func (s *Sender) ensureConnLocked(ctx context.Context) error {
-	if s.conn != nil {
-		return nil
-	}
-	d := net.Dialer{Timeout: time.Duration(s.cfg.ConnectTimeout)}
-	conn, err := d.DialContext(ctx, "tcp", s.cfg.Addr)
-	if err != nil {
-		return fmt.Errorf("mllp-sender: connect %s: %w", s.cfg.Addr, err)
-	}
-	s.conn = conn
-	s.br = bufio.NewReader(conn)
-	return nil
-}
-
-// ctxOr reports the context's error when it is the reason an I/O call
-// failed, so callers see "context canceled" rather than a bare timeout.
-func ctxOr(ctx context.Context, err error) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	// The read deadline may be the context's own deadline, in which case
-	// the I/O timeout fires in the same instant the context expires.
-	if dl, ok := ctx.Deadline(); ok && !time.Now().Before(dl) {
-		return context.DeadlineExceeded
-	}
-	return err
+	return s.conn.Close()
 }
 
 func (s *Sender) Send(ctx context.Context, payload []byte, meta map[string]string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := s.ensureConnLocked(ctx); err != nil {
-		return err // transient: receiver down
+	if err := s.conn.Connect(ctx); err != nil {
+		return fmt.Errorf("mllp-sender: connect %s: %w", s.cfg.Addr, err) // transient: receiver down
 	}
-	// Cancellation (shutdown) must unblock a send parked on a stalled
-	// peer: expiring the deadline is the only way to interrupt a blocked
-	// net.Conn read or write.
-	conn := s.conn
-	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
-	defer stop()
+	release := s.conn.Session(ctx)
+	defer release()
 
-	_ = conn.SetWriteDeadline(time.Now().Add(time.Duration(s.cfg.WriteTimeout)))
-	err := writeFrame(conn, payload)
-	_ = conn.SetWriteDeadline(time.Time{})
-	if err != nil {
-		s.dropConnLocked()
-		return fmt.Errorf("mllp-sender: write: %w", ctxOr(ctx, err))
+	if err := s.conn.Write(frame(payload)); err != nil {
+		s.conn.Drop()
+		return fmt.Errorf("mllp-sender: write: %w", tcp.CtxErr(ctx, err))
 	}
-	deadline := time.Now().Add(time.Duration(s.cfg.AckTimeout))
-	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
-		deadline = ctxDeadline
-	}
-	_ = conn.SetReadDeadline(deadline)
-	ackRaw, err := readFrame(s.br, s.cfg.MaxAckSize)
-	_ = conn.SetReadDeadline(time.Time{})
+	clear := s.conn.ReadDeadline(ctx, time.Duration(s.cfg.AckTimeout))
+	ackRaw, err := readFrame(s.conn.Reader(), s.cfg.MaxAckSize)
+	clear()
 	if err != nil {
-		s.dropConnLocked()
-		return fmt.Errorf("mllp-sender: waiting for ACK: %w", ctxOr(ctx, err))
+		s.conn.Drop()
+		return fmt.Errorf("mllp-sender: waiting for ACK: %w", tcp.CtxErr(ctx, err))
 	}
 
 	code, text, err := AckStatus(ackRaw)
 	if err != nil {
-		s.dropConnLocked()
+		s.conn.Drop()
 		return err // unparseable ACK: transient, resync the connection
 	}
 	switch code {

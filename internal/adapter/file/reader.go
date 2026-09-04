@@ -27,15 +27,12 @@ func init() {
 	})
 }
 
-// AckMode selects what "consumed" means for a file.
+// Ack modes, as for the network sources: immediate moves the file to
+// ProcessedDir once the engine has recorded it; destination waits for the
+// pipeline outcome and moves a rejected file to ErrorDir instead.
 const (
-	// AckImmediate moves the file to ProcessedDir as soon as the engine has
-	// recorded it (the Guaranteed Delivery handoff).
-	AckImmediate = "immediate"
-	// AckDestination waits for the pipeline outcome: an accepting decision
-	// moves the file to ProcessedDir, a rejection (script reject, failed
-	// waitForAck delivery) to ErrorDir.
-	AckDestination = "destination"
+	AckImmediate   = adapter.AckImmediate
+	AckDestination = adapter.AckDestination
 )
 
 // ReaderConfig configures the Polling Consumer. Each matching file is
@@ -52,8 +49,8 @@ type ReaderConfig struct {
 	MinAge       adapter.Duration `yaml:"minAge"`
 	ProcessedDir string           `yaml:"processedDir"` // default <dir>/processed
 	ErrorDir     string           `yaml:"errorDir"`     // default <dir>/error
-	// AckMode is immediate (default) or destination; see the constants.
-	AckMode string `yaml:"ackMode"`
+	// AckMode is immediate (default) or destination; see adapter.AckMode.
+	AckMode adapter.AckMode `yaml:"ackMode"`
 	// HoldTimeout bounds the wait for a pipeline outcome in destination
 	// mode; on expiry the file is treated as accepted (the engine owns it).
 	// Default 30s.
@@ -102,12 +99,11 @@ func NewReader(settings map[string]any) (*Reader, error) {
 	if cfg.ErrorDir == "" {
 		cfg.ErrorDir = filepath.Join(cfg.Dir, "error")
 	}
-	if cfg.AckMode == "" {
-		cfg.AckMode = AckImmediate
+	mode, err := adapter.ParseAckMode(string(cfg.AckMode))
+	if err != nil {
+		return nil, fmt.Errorf("file-reader: %w", err)
 	}
-	if cfg.AckMode != AckImmediate && cfg.AckMode != AckDestination {
-		return nil, fmt.Errorf("file-reader: ackMode must be %q or %q", AckImmediate, AckDestination)
-	}
+	cfg.AckMode = mode
 	if cfg.HoldTimeout <= 0 {
 		cfg.HoldTimeout = adapter.Duration(30 * time.Second)
 	}
@@ -205,18 +201,17 @@ func (r *Reader) poll(ctx context.Context, deliver adapter.DeliverFunc) {
 // settle moves a delivered file out of Dir according to the ack mode.
 func (r *Reader) settle(ctx context.Context, path, name string, rec adapter.Receipt) {
 	dest := r.cfg.ProcessedDir
-	if r.cfg.AckMode == AckDestination {
-		timer := time.NewTimer(time.Duration(r.cfg.HoldTimeout))
-		defer timer.Stop()
-		select {
-		case d := <-rec.Done:
-			if !accepting(d.Code) {
+	if r.cfg.AckMode == adapter.AckDestination {
+		d, outcome := adapter.AwaitDecision(ctx, rec, time.Duration(r.cfg.HoldTimeout))
+		switch outcome {
+		case adapter.Decided:
+			if !d.Accepted() {
 				r.log.Warn("file-reader: pipeline rejected file", "file", name, "message", rec.MessageID, "code", d.Code, "text", d.Text)
 				dest = r.cfg.ErrorDir
 			}
-		case <-timer.C:
+		case adapter.TimedOut:
 			r.log.Warn("file-reader: no pipeline outcome within holdTimeout; treating as accepted", "file", name, "message", rec.MessageID)
-		case <-ctx.Done():
+		case adapter.Canceled:
 			// Shutting down: the message is recorded, so the file is done.
 		}
 	}
@@ -226,12 +221,6 @@ func (r *Reader) settle(ctx context.Context, path, name string, rec adapter.Rece
 		r.log.Error("file-reader: delivered file could not be moved; it will not be re-read until restart",
 			"file", name, "message", rec.MessageID, "target", dest, "error", err)
 	}
-}
-
-// accepting reports whether an ACK code means the pipeline took the
-// message (HL7 AA, or the enhanced-mode CA).
-func accepting(code string) bool {
-	return code == "" || code == "AA" || code == "CA"
 }
 
 // moveTo relocates a consumed file, suffixing the name if the target already

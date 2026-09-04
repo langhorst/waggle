@@ -5,10 +5,10 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"sync"
 	"time"
 
 	"github.com/langhorst/waggle/internal/adapter"
+	"github.com/langhorst/waggle/internal/adapter/tcp"
 	metakey "github.com/langhorst/waggle/internal/meta"
 )
 
@@ -21,22 +21,15 @@ func init() {
 	})
 }
 
-// ACK modes (mirroring the MLLP listener).
-const (
-	// AckImmediate acknowledges the final frame as soon as the engine has
-	// recorded the message.
-	AckImmediate = "immediate"
-	// AckDestination holds the final frame's response until the pipeline
-	// finishes: success ACKs, rejection or timeout answers EOT (the E1381
-	// receiver interrupt — there is no application-status channel to carry
-	// a reason).
-	AckDestination = "destination"
-)
-
 // ListenerConfig configures the E1381 listener.
 type ListenerConfig struct {
-	Addr    string `yaml:"addr"`
-	AckMode string `yaml:"ackMode"` // default immediate
+	Addr string `yaml:"addr"`
+	// AckMode is immediate (default) or destination; see adapter.AckMode.
+	// In destination mode the final frame's response waits for the
+	// pipeline: an accepting decision ACKs, a rejection or timeout answers
+	// EOT (the E1381 receiver interrupt: there is no application-status
+	// channel to carry a reason).
+	AckMode adapter.AckMode `yaml:"ackMode"`
 	// HoldTimeout bounds the destination-mode wait on the final frame.
 	// Default 30s.
 	HoldTimeout adapter.Duration `yaml:"holdTimeout"`
@@ -45,26 +38,24 @@ type ListenerConfig struct {
 	FrameTimeout adapter.Duration `yaml:"frameTimeout"`
 	// MaxMessageSize bounds one assembled message. Default 10 MiB.
 	MaxMessageSize int `yaml:"maxMessageSize"`
+	// WriteTimeout bounds writing one control byte. Default 10s.
+	WriteTimeout adapter.Duration `yaml:"writeTimeout"`
 }
 
 // Listener is the E1381 inbound Channel Adapter. Each connection is one
-// half-duplex protocol peer: sessions (ENQ … EOT) arrive sequentially, each
-// carrying one E1394 message.
+// half-duplex protocol peer: sessions (ENQ ... EOT) arrive sequentially,
+// each carrying one E1394 message.
 type Listener struct {
 	cfg ListenerConfig
-
-	mu     sync.Mutex
-	ln     net.Listener
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	srv tcp.Server
 }
 
 func NewListener(settings map[string]any) (*Listener, error) {
 	cfg := ListenerConfig{
-		AckMode:        AckImmediate,
 		HoldTimeout:    adapter.Duration(30 * time.Second),
 		FrameTimeout:   adapter.Duration(30 * time.Second),
 		MaxMessageSize: 10 << 20,
+		WriteTimeout:   adapter.Duration(10 * time.Second),
 	}
 	if err := adapter.DecodeSettings(settings, &cfg); err != nil {
 		return nil, err
@@ -72,9 +63,11 @@ func NewListener(settings map[string]any) (*Listener, error) {
 	if cfg.Addr == "" {
 		return nil, fmt.Errorf("astm-listener: addr is required")
 	}
-	if cfg.AckMode != AckImmediate && cfg.AckMode != AckDestination {
-		return nil, fmt.Errorf("astm-listener: ackMode must be %q or %q", AckImmediate, AckDestination)
+	mode, err := adapter.ParseAckMode(string(cfg.AckMode))
+	if err != nil {
+		return nil, fmt.Errorf("astm-listener: %w", err)
 	}
+	cfg.AckMode = mode
 	if cfg.HoldTimeout <= 0 {
 		cfg.HoldTimeout = adapter.Duration(30 * time.Second)
 	}
@@ -84,73 +77,27 @@ func NewListener(settings map[string]any) (*Listener, error) {
 	if cfg.MaxMessageSize <= 0 {
 		cfg.MaxMessageSize = 10 << 20
 	}
+	if cfg.WriteTimeout <= 0 {
+		cfg.WriteTimeout = adapter.Duration(10 * time.Second)
+	}
 	return &Listener{cfg: cfg}, nil
 }
 
 // Addr returns the bound listen address (useful when configured with port
 // 0); empty until Start.
-func (l *Listener) Addr() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.ln == nil {
-		return ""
-	}
-	return l.ln.Addr().String()
-}
+func (l *Listener) Addr() string { return l.srv.Addr() }
 
 func (l *Listener) Start(ctx context.Context, deliver adapter.DeliverFunc) error {
-	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", l.cfg.Addr)
+	err := l.srv.Start(ctx, l.cfg.Addr, func(ctx context.Context, conn net.Conn) {
+		l.serve(ctx, conn, deliver)
+	})
 	if err != nil {
 		return fmt.Errorf("astm-listener: %w", err)
 	}
-	runCtx, cancel := context.WithCancel(ctx)
-
-	l.mu.Lock()
-	l.ln = ln
-	l.cancel = cancel
-	l.mu.Unlock()
-
-	l.wg.Add(1)
-	go func() {
-		defer l.wg.Done()
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return // listener closed
-			}
-			l.wg.Add(1)
-			go func() {
-				defer l.wg.Done()
-				defer conn.Close()
-				// Stop must not hang on connections a peer keeps open:
-				// closing them unblocks the reads below.
-				unregister := context.AfterFunc(runCtx, func() { conn.Close() })
-				defer unregister()
-				l.serve(runCtx, conn, deliver)
-			}()
-		}
-	}()
-	go func() {
-		<-runCtx.Done()
-		ln.Close()
-	}()
 	return nil
 }
 
-func (l *Listener) Stop() error {
-	l.mu.Lock()
-	cancel, ln := l.cancel, l.ln
-	l.cancel, l.ln = nil, nil
-	l.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	if ln != nil {
-		ln.Close()
-	}
-	l.wg.Wait()
-	return nil
-}
+func (l *Listener) Stop() error { return l.srv.Stop() }
 
 // session is the per-connection receiver state.
 type session struct {
@@ -238,10 +185,11 @@ func (l *Listener) handleFrame(ctx context.Context, conn net.Conn, s *session, f
 	}
 
 	// Final frame: the message is complete. Hand it to the engine BEFORE
-	// acknowledging — once ACKed, the sender considers it delivered.
+	// acknowledging: once ACKed, the sender considers it delivered. The
+	// handoff must not be cut short by Stop; only the hold below is.
 	msg := s.buf
 	s.buf = nil
-	rec, err := deliver(ctx, msg, meta)
+	rec, err := deliver(context.WithoutCancel(ctx), msg, meta)
 	if err != nil {
 		// Not recorded: NAK so the sender retransmits this frame (delivery
 		// is retried each time; nothing was persisted).
@@ -252,27 +200,27 @@ func (l *Listener) handleFrame(ctx context.Context, conn net.Conn, s *session, f
 	s.lastAcked = f.Number
 	s.expected = nextFrameNumber(f.Number)
 
-	if l.cfg.AckMode == AckImmediate {
+	if l.cfg.AckMode == adapter.AckImmediate {
 		l.respond(conn, ack)
 		return
 	}
-	timer := time.NewTimer(time.Duration(l.cfg.HoldTimeout))
-	defer timer.Stop()
-	select {
-	case d := <-rec.Done:
-		if d.Code == "AA" {
+	d, outcome := adapter.AwaitDecision(ctx, rec, time.Duration(l.cfg.HoldTimeout))
+	switch outcome {
+	case adapter.Decided:
+		if d.Accepted() {
 			l.respond(conn, ack)
 		} else {
 			l.respond(conn, eot) // pipeline rejected: interrupt
 		}
-	case <-timer.C:
+	case adapter.TimedOut:
 		l.respond(conn, eot)
-	case <-ctx.Done():
+	case adapter.Canceled:
+		// Stopping: the message is recorded; the connection closes.
 	}
 }
 
 func (l *Listener) respond(conn net.Conn, b byte) {
-	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetWriteDeadline(time.Now().Add(time.Duration(l.cfg.WriteTimeout)))
 	_, _ = conn.Write([]byte{b})
 	_ = conn.SetWriteDeadline(time.Time{})
 }

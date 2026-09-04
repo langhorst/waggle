@@ -32,15 +32,15 @@ func init() {
 
 // Ack modes, matching the MLLP listener's semantics.
 const (
-	AckImmediate   = "immediate"
-	AckDestination = "destination"
+	AckImmediate   = adapter.AckImmediate
+	AckDestination = adapter.AckDestination
 )
 
 // ListenerConfig configures the HTTP listener.
 type ListenerConfig struct {
-	Listen  string `yaml:"listen"`
-	Path    string `yaml:"path"`    // default "/"
-	AckMode string `yaml:"ackMode"` // default immediate
+	Listen  string          `yaml:"listen"`
+	Path    string          `yaml:"path"`    // default "/"
+	AckMode adapter.AckMode `yaml:"ackMode"` // default immediate
 	// HoldTimeout bounds how long a destination-mode response is held;
 	// on expiry the caller gets 504. Default 30s.
 	HoldTimeout adapter.Duration `yaml:"holdTimeout"`
@@ -89,9 +89,11 @@ func NewListener(settings map[string]any) (*Listener, error) {
 	if cfg.Listen == "" {
 		return nil, fmt.Errorf("http-listener: listen is required")
 	}
-	if cfg.AckMode != AckImmediate && cfg.AckMode != AckDestination {
-		return nil, fmt.Errorf("http-listener: ackMode must be %q or %q", AckImmediate, AckDestination)
+	mode, err := adapter.ParseAckMode(string(cfg.AckMode))
+	if err != nil {
+		return nil, fmt.Errorf("http-listener: %w", err)
 	}
+	cfg.AckMode = mode
 	if !strings.HasPrefix(cfg.Path, "/") {
 		cfg.Path = "/" + cfg.Path
 	}
@@ -236,26 +238,32 @@ func (l *Listener) handle(ctx context.Context, w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusAccepted, map[string]any{"messageId": rec.MessageID})
 		return
 	}
-	timer := time.NewTimer(time.Duration(l.cfg.HoldTimeout))
-	defer timer.Stop()
-	select {
-	case d := <-rec.Done:
+	// A client that disconnects releases its handler: fold its context
+	// into the hold.
+	holdCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(r.Context(), cancel)
+	defer stop()
+	d, outcome := adapter.AwaitDecision(holdCtx, rec, time.Duration(l.cfg.HoldTimeout))
+	switch outcome {
+	case adapter.Decided:
 		writeJSON(w, statusForAck(d.Code), map[string]any{
 			"code": d.Code, "text": d.Text, "messageId": rec.MessageID,
 		})
-	case <-timer.C:
+	case adapter.TimedOut:
 		writeJSON(w, http.StatusGatewayTimeout, map[string]any{
-			"code": "AE", "text": "processing timed out", "messageId": rec.MessageID,
+			"code": d.Code, "text": d.Text, "messageId": rec.MessageID,
 		})
-	case <-ctx.Done():
+	case adapter.Canceled:
+		if ctx.Err() == nil {
+			return // the client went away, not the listener; nobody to answer
+		}
 		// Stop released the hold. The message is recorded and will be
 		// processed; only the outcome is unknown, which is what 202 says.
 		// Returning without writing produced an implicit empty 200.
 		writeJSON(w, http.StatusAccepted, map[string]any{
 			"messageId": rec.MessageID, "text": "listener stopped before the outcome was known",
 		})
-	case <-r.Context().Done():
-		// Client went away; nobody to answer.
 	}
 }
 
