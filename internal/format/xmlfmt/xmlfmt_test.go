@@ -87,6 +87,24 @@ func TestParseRejectsGarbage(t *testing.T) {
 	}
 }
 
+// TestParseDepthLimit: element nesting beyond MaxDepth is a parse error,
+// not a stack overflow.
+func TestParseDepthLimit(t *testing.T) {
+	deep := strings.Repeat("<a>", MaxDepth+1) + strings.Repeat("</a>", MaxDepth+1)
+	if _, err := dt.Parse([]byte(deep)); err == nil || !strings.Contains(err.Error(), "nesting") {
+		t.Fatalf("Parse(%d levels): want nesting error, got %v", MaxDepth+1, err)
+	}
+	ok := strings.Repeat("<a>", MaxDepth) + strings.Repeat("</a>", MaxDepth)
+	if _, err := dt.Parse([]byte(ok)); err != nil {
+		t.Fatalf("Parse(%d levels): %v", MaxDepth, err)
+	}
+	// A megabyte of open tags, the shape of the original crash.
+	huge := strings.Repeat("<a>", 350_000)
+	if _, err := dt.Parse([]byte(huge)); err == nil {
+		t.Fatal("Parse(1 MiB of '<a>'): want error")
+	}
+}
+
 func TestResolve(t *testing.T) {
 	root, err := dt.Parse([]byte(patientXML))
 	if err != nil {

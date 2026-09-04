@@ -56,6 +56,31 @@ func TestParseRejectsGarbage(t *testing.T) {
 	}
 }
 
+// TestParseDepthLimit: nesting beyond MaxDepth is a parse error, not a
+// stack overflow. The rejected input is far smaller than any transport's
+// body limit, so this is the only thing standing between a hostile payload
+// and a dead process.
+func TestParseDepthLimit(t *testing.T) {
+	deep := strings.Repeat("[", MaxDepth+1) + strings.Repeat("]", MaxDepth+1)
+	if _, err := dt.Parse([]byte(deep)); err == nil || !strings.Contains(err.Error(), "nesting") {
+		t.Fatalf("Parse(%d levels): want nesting error, got %v", MaxDepth+1, err)
+	}
+	objects := strings.Repeat(`{"a":`, MaxDepth+1) + "1" + strings.Repeat("}", MaxDepth+1)
+	if _, err := dt.Parse([]byte(objects)); err == nil {
+		t.Fatalf("Parse(%d object levels): want error", MaxDepth+1)
+	}
+	// Exactly at the limit still parses.
+	ok := strings.Repeat("[", MaxDepth) + strings.Repeat("]", MaxDepth)
+	if _, err := dt.Parse([]byte(ok)); err != nil {
+		t.Fatalf("Parse(%d levels): %v", MaxDepth, err)
+	}
+	// A megabyte of open brackets, the shape of the original crash.
+	huge := strings.Repeat("[", 1<<20)
+	if _, err := dt.Parse([]byte(huge)); err == nil {
+		t.Fatal("Parse(1 MiB of '['): want error")
+	}
+}
+
 func TestTypePreservation(t *testing.T) {
 	root, err := dt.Parse([]byte(`{"count":5,"active":true,"note":"5","gone":null}`))
 	if err != nil {

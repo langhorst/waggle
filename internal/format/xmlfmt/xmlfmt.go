@@ -65,6 +65,12 @@ type parser struct {
 	stack []nsFrame
 }
 
+// MaxDepth bounds element nesting. element recurses once per level, and a
+// payload of nothing but "<a><a><a>" within the transport's size limit
+// would otherwise overflow the goroutine stack, which is a fatal error
+// rather than a recoverable panic.
+const MaxDepth = 512
+
 func (DataType) Parse(raw []byte) (*message.Node, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return nil, fmt.Errorf("xml: empty message")
@@ -116,6 +122,9 @@ func (DataType) Parse(raw []byte) (*message.Node, error) {
 
 // element consumes one element (start tag already read) into a node.
 func (p *parser) element(start xml.StartElement) (*message.Node, error) {
+	if len(p.stack) >= MaxDepth {
+		return nil, fmt.Errorf("nesting deeper than %d levels", MaxDepth)
+	}
 	frame := nsFrame{}
 	for _, a := range start.Attr {
 		switch {

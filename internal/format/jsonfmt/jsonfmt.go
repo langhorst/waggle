@@ -43,11 +43,17 @@ type DataType struct{}
 
 func (DataType) Name() string { return "json" }
 
+// MaxDepth bounds container nesting. Parsing recurses once per level, and
+// a payload of nothing but "[[[[" within the transport's size limit would
+// otherwise overflow the goroutine stack, which is a fatal error rather
+// than a recoverable panic. Real documents nest a few dozen levels deep.
+const MaxDepth = 512
+
 func (DataType) Parse(raw []byte) (*message.Node, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	root := &message.Node{Name: "json"}
-	if err := decodeValue(dec, root); err != nil {
+	if err := decodeValue(dec, root, 0); err != nil {
 		if errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("json: empty message")
 		}
@@ -60,13 +66,17 @@ func (DataType) Parse(raw []byte) (*message.Node, error) {
 }
 
 // decodeValue reads one JSON value from dec into n (name already set).
-func decodeValue(dec *json.Decoder, n *message.Node) error {
+// depth is the container nesting level of n.
+func decodeValue(dec *json.Decoder, n *message.Node, depth int) error {
 	tok, err := dec.Token()
 	if err != nil {
 		return err
 	}
 	switch t := tok.(type) {
 	case json.Delim:
+		if depth >= MaxDepth {
+			return fmt.Errorf("nesting deeper than %d levels", MaxDepth)
+		}
 		switch t {
 		case '{':
 			n.Kind = KindObject
@@ -76,7 +86,7 @@ func decodeValue(dec *json.Decoder, n *message.Node) error {
 					return err
 				}
 				child := &message.Node{Name: keyTok.(string)}
-				if err := decodeValue(dec, child); err != nil {
+				if err := decodeValue(dec, child, depth+1); err != nil {
 					return err
 				}
 				n.Children = append(n.Children, child)
@@ -87,7 +97,7 @@ func decodeValue(dec *json.Decoder, n *message.Node) error {
 			n.Kind = KindArray
 			for dec.More() {
 				child := &message.Node{Name: elementName(len(n.Children))}
-				if err := decodeValue(dec, child); err != nil {
+				if err := decodeValue(dec, child, depth+1); err != nil {
 					return err
 				}
 				n.Children = append(n.Children, child)
