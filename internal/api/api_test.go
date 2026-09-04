@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -381,6 +382,131 @@ func TestScriptEndpoints(t *testing.T) {
 	code, _ = h.do("PUT", "/api/scripts?path="+outside, "x")
 	if code != 400 {
 		t.Errorf("outside path write = %d", code)
+	}
+}
+
+// TestScriptEndpointConfinement pins down what /api/scripts refuses to
+// touch. ScriptsRoot is the channels directory, so an endpoint that writes
+// any file under it could rewrite channel YAML and have the reload action
+// apply it.
+func TestScriptEndpointConfinement(t *testing.T) {
+	h := newHarness(t)
+	channelsDir := filepath.Join(h.work, "channels")
+	scriptsDir := filepath.Join(channelsDir, "scripts")
+
+	// A file outside the root, reachable through a symlink inside it.
+	outside := filepath.Join(h.work, "outside.js")
+	if err := os.WriteFile(outside, []byte("function transform(msg) {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(scriptsDir, "link.js")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	// A .js file under the root that no channel references.
+	stray := filepath.Join(scriptsDir, "stray.js")
+	if err := os.WriteFile(stray, []byte("function transform(msg) {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := os.ReadFile(filepath.Join(channelsDir, "feed.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rejected := map[string]string{
+		"channel yaml":           filepath.Join(channelsDir, "feed.yaml"),
+		"new yaml":               filepath.Join(channelsDir, "evil.yaml"),
+		"root itself":            channelsDir,
+		"scripts dir":            scriptsDir,
+		"symlink escaping root":  link,
+		"unreferenced script":    stray,
+		"traversal":              filepath.Join(scriptsDir, "..", "feed.yaml"),
+		"traversal with js name": filepath.Join(scriptsDir, "..", "..", "outside.js"),
+		"empty":                  "",
+	}
+	for name, p := range rejected {
+		t.Run(name, func(t *testing.T) {
+			if code, raw := h.do("GET", "/api/scripts?path="+p, ""); code != 400 {
+				t.Errorf("read = %d %s", code, raw)
+			}
+			if code, raw := h.do("PUT", "/api/scripts?path="+p, "id: pwned\n"); code != 400 {
+				t.Errorf("write = %d %s", code, raw)
+			}
+			if code, _ := h.do("GET", "/scripts/edit?path="+p, ""); code != 400 {
+				t.Errorf("editor page = %d", code)
+			}
+		})
+	}
+	after, err := os.ReadFile(filepath.Join(channelsDir, "feed.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("channel YAML was modified through the scripts endpoint")
+	}
+	if _, err := os.Stat(filepath.Join(channelsDir, "evil.yaml")); !os.IsNotExist(err) {
+		t.Fatal("a new file was created through the scripts endpoint")
+	}
+	if got, _ := os.ReadFile(outside); string(got) != "function transform(msg) {}" {
+		t.Fatal("file outside the root was modified through a symlink")
+	}
+
+	// Error bodies name no filesystem detail.
+	_, raw := h.do("GET", "/api/scripts?path="+link, "")
+	if strings.Contains(string(raw), h.work) {
+		t.Errorf("error leaks the filesystem path: %s", raw)
+	}
+}
+
+// TestScriptWriteTruncatedBody: a client that dies mid-upload must not
+// leave a half-written script on disk for the hot-reload watcher to
+// compile.
+func TestScriptWriteTruncatedBody(t *testing.T) {
+	h := newHarness(t)
+	path := filepath.Join(h.work, "channels", "scripts", "upper.js")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(h.ts.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	partial := "function transform(msg) { msg.set('PID-5.1', 'TRUNC"
+	fmt.Fprintf(conn, "PUT /api/scripts?path=%s HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\n\r\n%s",
+		path, testToken, len(partial)+100, partial)
+	// Half-close so the server sees EOF before Content-Length is satisfied.
+	if tc, ok := conn.(*net.TCPConn); ok {
+		tc.CloseWrite()
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode != 400 {
+			t.Errorf("truncated upload = %d, want 400", resp.StatusCode)
+		}
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("truncated body was written: %q", after)
+	}
+}
+
+func TestScriptWriteTooLarge(t *testing.T) {
+	h := newHarness(t)
+	path := filepath.Join(h.work, "channels", "scripts", "upper.js")
+	code, raw := h.do("PUT", "/api/scripts?path="+path, strings.Repeat("/", maxScriptSize+1))
+	if code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized write = %d %s", code, raw)
+	}
+	if got, _ := os.ReadFile(path); strings.HasPrefix(string(got), "//") {
+		t.Fatal("oversized body was written")
 	}
 }
 

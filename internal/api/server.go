@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -355,26 +356,80 @@ func (s *Server) handleChannelScripts(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, refs)
 }
 
-// confineScriptPath resolves p and ensures it stays inside ScriptsRoot.
+// errScriptPath is the one error the script endpoints return for a path
+// they will not serve. The reason is logged, never echoed: the specific
+// check that failed is of no use to a legitimate editor and of some use
+// to anyone probing the filesystem.
+var errScriptPath = errors.New("path is not an editable script of a loaded channel")
+
+// confineScriptPath resolves p and decides whether the script endpoints may
+// touch it. A path qualifies only when every check holds:
+//
+//   - it is a .js file that a loaded channel references (the editor only
+//     ever links those; ScriptsRoot also holds the channel YAML, which
+//     must stay out of reach of an endpoint that can rewrite files);
+//   - after resolving symlinks it still lives under ScriptsRoot.
+//
+// The returned path is absolute with symlinks resolved, so reads and writes
+// land on the real file.
 func (s *Server) confineScriptPath(p string) (string, error) {
+	real, err := s.resolveScriptPath(p)
+	if err != nil {
+		s.Log.Warn("script path rejected", "path", p, "reason", err)
+		return "", errScriptPath
+	}
+	return real, nil
+}
+
+func (s *Server) resolveScriptPath(p string) (string, error) {
 	if p == "" {
 		return "", errors.New("path is required")
 	}
 	if s.ScriptsRoot == "" {
 		return "", errors.New("script editing is not configured")
 	}
-	root, err := filepath.Abs(s.ScriptsRoot)
-	if err != nil {
-		return "", err
+	if strings.ToLower(filepath.Ext(p)) != ".js" {
+		return "", errors.New("not a .js file")
 	}
 	abs, err := filepath.Abs(p)
 	if err != nil {
 		return "", err
 	}
-	if abs != root && !strings.HasPrefix(abs, root+string(filepath.Separator)) {
-		return "", fmt.Errorf("path %q is outside the configured scripts root", p)
+	if !s.isReferencedScript(abs) {
+		return "", errors.New("not referenced by any loaded channel")
 	}
-	return abs, nil
+	root, err := filepath.EvalSymlinks(s.ScriptsRoot)
+	if err != nil {
+		return "", fmt.Errorf("scripts root: %w", err)
+	}
+	if root, err = filepath.Abs(root); err != nil {
+		return "", err
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(real, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("resolves to %s, outside the scripts root", real)
+	}
+	return real, nil
+}
+
+// isReferencedScript reports whether abs is one of the script files a
+// loaded channel configuration points at.
+func (s *Server) isReferencedScript(abs string) bool {
+	for _, info := range s.Eng.Channels() {
+		cfg, ok := s.Eng.Config(info.ID)
+		if !ok {
+			continue
+		}
+		for _, sp := range cfg.ScriptPaths() {
+			if resolved, err := filepath.Abs(sp); err == nil && resolved == abs {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Server) handleScriptRead(w http.ResponseWriter, r *http.Request) {
@@ -396,27 +451,30 @@ func (s *Server) handleScriptRead(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(raw)
 }
 
+// maxScriptSize bounds a PUT /api/scripts body.
+const maxScriptSize = 1 << 20
+
 func (s *Server) handleScriptWrite(w http.ResponseWriter, r *http.Request) {
 	path, err := s.confineScriptPath(r.URL.Query().Get("path"))
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	body := make([]byte, 0, 4096)
-	buf := make([]byte, 4096)
-	for {
-		n, readErr := r.Body.Read(buf)
-		body = append(body, buf[:n]...)
-		if len(body) > 1<<20 {
-			s.writeError(w, http.StatusRequestEntityTooLarge, errors.New("script too large (1 MiB max)"))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxScriptSize))
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			s.writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("script too large (%d bytes max)", maxScriptSize))
 			return
 		}
-		if readErr != nil {
-			break
-		}
+		// A truncated upload must never reach the file: the hot-reload
+		// watcher would compile the fragment.
+		s.writeError(w, http.StatusBadRequest, fmt.Errorf("reading script body: %w", err))
+		return
 	}
-	if err := os.WriteFile(path, body, 0o644); err != nil {
-		s.writeError(w, http.StatusInternalServerError, err)
+	if err := writeFileAtomic(path, body, 0o644); err != nil {
+		s.Log.Error("writing script", "path", path, "error", err)
+		s.writeError(w, http.StatusInternalServerError, errors.New("writing script failed"))
 		return
 	}
 	// Recompile immediately so the editor gets compile feedback; a failed
@@ -431,6 +489,37 @@ func (s *Server) handleScriptWrite(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+}
+
+// writeFileAtomic replaces path's contents via a temp file and rename so no
+// reader (the script hot-reload watcher included) ever sees a partial
+// write.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { os.Remove(tmpName) }
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		cleanup()
+		return err
+	}
+	return nil
 }
 
 func pathID(r *http.Request) (int64, error) {
