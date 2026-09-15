@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -136,5 +137,69 @@ func TestHTTPBackendUnreachable(t *testing.T) {
 	b := &tui.HTTPBackend{BaseURL: "http://127.0.0.1:1"}
 	if _, err := b.ChannelSummaries(context.Background()); err == nil || !strings.Contains(err.Error(), "unreachable") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// TestHTTPBackendBasicAuth: a daemon configured with basicUser/basicPassword
+// is reachable by the TUI, which was previously token-only.
+func TestHTTPBackendBasicAuth(t *testing.T) {
+	var gotUser, gotPass, gotAuthHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthHeader = r.Header.Get("Authorization")
+		u, p, ok := r.BasicAuth()
+		if !ok {
+			w.Header().Set("WWW-Authenticate", `Basic realm="waggle"`)
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		gotUser, gotPass = u, p
+		if u != "ops" || p != "pw" {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	b := &tui.HTTPBackend{BaseURL: srv.URL, BasicUser: "ops", BasicPassword: "pw"}
+	if _, err := b.ChannelSummaries(context.Background()); err != nil {
+		t.Fatalf("basic auth should be accepted: %v", err)
+	}
+	if gotUser != "ops" || gotPass != "pw" {
+		t.Errorf("sent user/pass = %q/%q", gotUser, gotPass)
+	}
+	if !strings.HasPrefix(gotAuthHeader, "Basic ") {
+		t.Errorf("expected a Basic header, got %q", gotAuthHeader)
+	}
+
+	// Wrong password surfaces as tui.ErrUnauthorized so the CLI can explain it.
+	bad := &tui.HTTPBackend{BaseURL: srv.URL, BasicUser: "ops", BasicPassword: "nope"}
+	_, err := bad.ChannelSummaries(context.Background())
+	if !errors.Is(err, tui.ErrUnauthorized) {
+		t.Errorf("expected tui.ErrUnauthorized, got %v", err)
+	}
+
+	// No credentials at all is also tui.ErrUnauthorized, not a generic failure.
+	none := &tui.HTTPBackend{BaseURL: srv.URL}
+	if _, err := none.ChannelSummaries(context.Background()); !errors.Is(err, tui.ErrUnauthorized) {
+		t.Errorf("expected tui.ErrUnauthorized with no credentials, got %v", err)
+	}
+}
+
+// A token takes precedence over basic credentials: it satisfies the daemon
+// on its own and is what the Bearer header is for.
+func TestHTTPBackendTokenWins(t *testing.T) {
+	var header string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+	b := &tui.HTTPBackend{BaseURL: srv.URL, Token: "tok", BasicUser: "ops", BasicPassword: "pw"}
+	if _, err := b.ChannelSummaries(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if header != "Bearer tok" {
+		t.Errorf("Authorization = %q, want the bearer token", header)
 	}
 }
