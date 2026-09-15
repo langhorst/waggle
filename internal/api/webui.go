@@ -25,7 +25,17 @@ var templateFS embed.FS
 var staticFS embed.FS
 
 // Vendored frontend assets (fully offline): htmx 1.9.12, Flowbite 2.5.2,
-// and the Tailwind browser runtime that Flowbite's utility classes need.
+// the Tailwind browser runtime that Flowbite's utility classes need, and
+// codeedit.{js,css} -- our own JavaScript highlighter for the script editor,
+// written rather than vendored so the UI keeps needing no network.
+//
+// Note for anyone styling form controls here: flowbite.min.css is an
+// unlayered Tailwind v3 build and the Tailwind runtime is v4, which emits
+// utilities inside `@layer utilities`. Unlayered CSS wins over layered CSS
+// regardless of specificity, so Flowbite's Preflight (`color: inherit` and
+// `font-family: inherit` on input/select/textarea) silently defeats any
+// text-* or font-* utility that Flowbite's own build did not already
+// include. Style form controls with explicit CSS, as codeedit.css does.
 
 // badgeTmpl renders a state/status pill; going through html/template keeps
 // the label contextually escaped even if it ever stops being a constant.

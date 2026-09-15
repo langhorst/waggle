@@ -28,7 +28,7 @@ func TestWebDashboard(t *testing.T) {
 
 func TestWebStaticAssets(t *testing.T) {
 	h := newHarness(t)
-	for _, asset := range []string{"htmx.min.js", "flowbite.min.css", "flowbite.min.js", "tailwind.js"} {
+	for _, asset := range []string{"htmx.min.js", "flowbite.min.css", "flowbite.min.js", "tailwind.js", "codeedit.js", "codeedit.css"} {
 		code, raw := h.do("GET", "/static/"+asset, "")
 		if code != 200 || len(raw) < 1000 {
 			t.Errorf("asset %s = %d (%d bytes)", asset, code, len(raw))
@@ -109,6 +109,42 @@ func TestWebScriptsAndEditor(t *testing.T) {
 	code, raw = h.do("GET", "/scripts/edit?path="+refs[0].Path, "")
 	if code != 200 || !strings.Contains(string(raw), "toUpperCase") || !strings.Contains(string(raw), "save-btn") {
 		t.Errorf("editor page = %d", code)
+	}
+	page := string(raw)
+	// The highlighter is served from the binary, so the editor works with no
+	// network. Its textarea also carries the fallback class that makes it
+	// readable before (or without) the script.
+	for _, want := range []string{"/static/codeedit.css", "/static/codeedit.js", "code-editor-fallback"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("editor page missing %q", want)
+		}
+	}
+	// The per-page head block must not leak into pages that do not define
+	// one, or every page would pull the editor assets.
+	_, dash := h.do("GET", "/", "")
+	if strings.Contains(string(dash), "codeedit") {
+		t.Error("dashboard should not reference the editor assets")
+	}
+}
+
+// The editor's colours cannot come from Tailwind utilities: flowbite.min.css
+// is an unlayered build whose Preflight sets color/font-family on textarea,
+// and unlayered CSS outranks the layered utilities the Tailwind v4 runtime
+// emits. Assert the stylesheet keeps its own explicit rules.
+func TestEditorStylesheetDefinesItsOwnColours(t *testing.T) {
+	h := newHarness(t)
+	code, raw := h.do("GET", "/static/codeedit.css", "")
+	if code != 200 {
+		t.Fatalf("codeedit.css = %d", code)
+	}
+	css := string(raw)
+	for _, want := range []string{
+		"--ce-fg", "--ce-bg", "prefers-color-scheme: dark",
+		".code-editor-fallback", ".tok-keyword", ".tok-string", ".tok-comment",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("codeedit.css missing %q", want)
+		}
 	}
 }
 

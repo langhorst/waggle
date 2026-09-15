@@ -1,6 +1,11 @@
+{{define "head"}}
+<link rel="stylesheet" href="/static/codeedit.css">
+<script src="/static/codeedit.js" defer></script>
+{{end}}
+
 {{define "content"}}
 <div class="flex items-center justify-between mb-4">
-  <h1 class="text-xl font-bold text-gray-900 dark:text-white font-mono">{{.Path}}</h1>
+  <h1 class="text-xl font-bold text-gray-900 dark:text-white" style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace">{{.Path}}</h1>
   <div class="flex items-center gap-3">
     <span id="save-result" class="text-sm"></span>
     <button id="save-btn"
@@ -11,27 +16,61 @@
 </div>
 <p class="text-xs text-gray-400 mb-2">
   Saving recompiles immediately; a compile error keeps the previous version running and is shown here.
+  <span class="ms-2">Tab indents, Shift+Tab outdents, Ctrl/Cmd+S saves.</span>
 </p>
-<textarea id="editor" spellcheck="false"
-  class="block w-full h-[32rem] p-4 font-mono text-sm text-gray-100 bg-gray-900 rounded-lg border border-gray-700 focus:ring-blue-500 focus:border-blue-500">{{.Content}}</textarea>
+
+<!-- Ships as a plain textarea and is readable as one; codeedit.js wraps it
+     in the highlighted editor once it loads. -->
+<textarea id="editor" class="code-editor-fallback" spellcheck="false" wrap="off"
+  autocapitalize="off" autocomplete="off" aria-label="script source">{{.Content}}</textarea>
 
 <script>
-  document.getElementById('save-btn').addEventListener('click', async () => {
+  (function () {
+    const textarea = document.getElementById('editor');
     const result = document.getElementById('save-result');
-    result.textContent = 'saving…';
-    result.className = 'text-sm text-gray-400';
-    const resp = await fetch('/api/scripts?path=' + encodeURIComponent({{.Path}}), {
-      method: 'PUT',
-      body: document.getElementById('editor').value,
-    });
-    const body = await resp.json();
-    if (resp.ok) {
-      result.textContent = 'saved & reloaded';
-      result.className = 'text-sm text-green-600 dark:text-green-400';
-    } else {
-      result.textContent = body.error || 'save failed';
-      result.className = 'text-sm text-red-600 dark:text-red-400';
+    const path = {{.Path}};
+
+    // codeedit.js is deferred, so it may not have run yet.
+    function enhance() {
+      if (window.CodeEdit) window.CodeEdit.attach(textarea, { height: '32rem' });
     }
-  });
+    if (window.CodeEdit) enhance();
+    else document.addEventListener('DOMContentLoaded', enhance);
+
+    let saving = false;
+    async function save() {
+      if (saving) return;
+      saving = true;
+      result.textContent = 'saving…';
+      result.className = 'text-sm text-gray-500 dark:text-gray-400';
+      try {
+        const resp = await fetch('/api/scripts?path=' + encodeURIComponent(path), {
+          method: 'PUT',
+          body: textarea.value,
+        });
+        const body = await resp.json().catch(() => ({}));
+        if (resp.ok) {
+          result.textContent = 'saved & reloaded';
+          result.className = 'text-sm text-green-600 dark:text-green-400';
+        } else {
+          result.textContent = body.error || ('save failed (' + resp.status + ')');
+          result.className = 'text-sm text-red-600 dark:text-red-400';
+        }
+      } catch (err) {
+        result.textContent = 'save failed: ' + err;
+        result.className = 'text-sm text-red-600 dark:text-red-400';
+      } finally {
+        saving = false;
+      }
+    }
+
+    document.getElementById('save-btn').addEventListener('click', save);
+    document.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        save();
+      }
+    });
+  })();
 </script>
 {{end}}
