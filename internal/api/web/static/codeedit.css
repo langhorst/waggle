@@ -1,11 +1,10 @@
 /* Code editor: a syntax-highlighted overlay behind a transparent textarea.
  *
  * These rules are deliberately plain CSS rather than Tailwind utilities.
- * flowbite.min.css is an unlayered Tailwind v3 build whose Preflight sets
- * `color: inherit; font-family: inherit` on textarea, while the Tailwind v4
- * runtime emits utilities inside `@layer utilities` -- and unlayered CSS
- * beats layered CSS whatever the specificity. Utilities like text-gray-100
- * and font-mono therefore never reach a textarea. */
+ * The editor carries a theme of its own -- a dozen token colours in two
+ * schemes -- which belongs in a stylesheet rather than spread across class
+ * attributes; keeping it here also means the editor does not depend on
+ * which utilities the vendored Tailwind build happens to contain. */
 
 :root {
   /* Light theme. Every token colour clears 4.5:1 on --ce-bg. */

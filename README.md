@@ -235,7 +235,7 @@ GET    /api/messages/{id}/diff?dest={destID}
 POST   /api/messages/{id}/replay[?destination={destID}]
 ```
 
-The web UI (HTMX + Flowbite, embedded and offline) is served at `/` and is
+The web UI (HTMX + Flowbite, embedded and offline, light and dark) is served at `/` and is
 the full-control surface; the TUI is a read-only observer that attaches to
 a running daemon over the same API and event stream:
 

@@ -19,7 +19,7 @@ func TestWebDashboard(t *testing.T) {
 		t.Fatalf("dashboard = %d", code)
 	}
 	page := string(raw)
-	for _, want := range []string{"Waggle", "feed", "STARTED", "/static/htmx.min.js", "/static/flowbite.min.css", "EventSource"} {
+	for _, want := range []string{"Waggle", "feed", "STARTED", "/static/htmx.min.js", "/static/app.css", "EventSource"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("dashboard missing %q", want)
 		}
@@ -32,6 +32,51 @@ func TestWebStaticAssets(t *testing.T) {
 		code, raw := h.do("GET", "/static/"+asset, "")
 		if code != 200 || len(raw) < 1000 {
 			t.Errorf("asset %s = %d (%d bytes)", asset, code, len(raw))
+		}
+	}
+	// app.css is the entry point and is deliberately tiny.
+	if code, raw := h.do("GET", "/static/app.css", ""); code != 200 || len(raw) == 0 {
+		t.Errorf("app.css = %d (%d bytes)", code, len(raw))
+	}
+}
+
+// Dark mode depends entirely on cascade layers. flowbite.min.css is an
+// unlayered Tailwind v3 build; the Tailwind v4 runtime emits utilities in
+// `@layer utilities`, and unlayered CSS outranks layered CSS whatever the
+// specificity -- so linking Flowbite directly makes every dark: variant
+// lose to its plain counterpart, and the theme silently never applies.
+// app.css exists to import Flowbite into a lower layer. If a page ever
+// links flowbite.min.css again, dark mode dies with no other symptom, so
+// assert the arrangement rather than the rendering.
+func TestStylesheetLayeringKeepsDarkModeAlive(t *testing.T) {
+	h := newHarness(t)
+	code, raw := h.do("GET", "/static/app.css", "")
+	if code != 200 {
+		t.Fatalf("app.css = %d", code)
+	}
+	css := string(raw)
+	// Flowbite must arrive through a layered @import, below `utilities`.
+	if !strings.Contains(css, "layer(vendor)") || !strings.Contains(css, "flowbite.min.css") {
+		t.Error("app.css must @import flowbite.min.css into the vendor layer")
+	}
+	order := "@layer vendor, theme, base, compat, components, utilities;"
+	if !strings.Contains(css, order) {
+		t.Errorf("app.css must declare the layer order %q", order)
+	}
+
+	// Every page must link app.css and none may link Flowbite directly.
+	for _, path := range []string{"/", "/channels/feed", "/channels/feed/dlq", "/channels/feed/scripts"} {
+		code, raw := h.do("GET", path, "")
+		if code != 200 {
+			t.Errorf("%s = %d", path, code)
+			continue
+		}
+		page := string(raw)
+		if !strings.Contains(page, `href="/static/app.css"`) {
+			t.Errorf("%s does not link app.css", path)
+		}
+		if strings.Contains(page, `href="/static/flowbite.min.css"`) {
+			t.Errorf("%s links flowbite.min.css directly, which disables dark mode", path)
 		}
 	}
 }

@@ -1,0 +1,53 @@
+/* Stylesheet entry point: it exists to fix a cascade-layer mismatch between
+ * the two vendored stylesheets.
+ *
+ * flowbite.min.css is a Tailwind v3 build and is entirely unlayered -- 1850
+ * rules including its Preflight. tailwind.js is the Tailwind v4 runtime,
+ * which emits every utility inside `@layer theme, base, components,
+ * utilities`. Unlayered CSS outranks layered CSS whatever the specificity,
+ * so Flowbite's plain `.bg-gray-50` beat the runtime's `dark:bg-gray-900`
+ * and the entire dark theme never applied; the same mismatch let Flowbite's
+ * `textarea { color: inherit }` defeat any text-* utility on a form control.
+ *
+ * Importing Flowbite into a layer of its own fixes both at the root: named
+ * layers rank in the order they are first declared, so the line below puts
+ * `vendor` beneath everything Tailwind emits and the utilities win again. */
+
+@layer vendor, theme, base, compat, components, utilities;
+
+@import url("/static/flowbite.min.css") layer(vendor);
+
+/* Tailwind v4's Preflight now outranks Flowbite's, and the two disagree
+ * about one default: v3 resets borders to `0 solid <gray-200>`, v4 to
+ * `0 solid` -- which leaves border-color at currentColor, turning every
+ * `border`/`border-b` without an explicit colour into a near-black line.
+ * Restoring the v3 default keeps the existing markup looking as designed,
+ * in a layer below `utilities` so explicit border-* classes still win. */
+@layer compat {
+  *,
+  ::before,
+  ::after {
+    border-color: #e5e7eb;
+  }
+
+  /* Same story for the font stack: Flowbite's Preflight puts Inter at the
+   * front of it, Tailwind v4's starts at the system font. Inter is only
+   * named, never bundled (this UI ships no webfonts), so the two agree for
+   * anyone without it installed -- but keeping Flowbite's stack means the
+   * layering fix changes no typography at all. */
+  html {
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+      Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif,
+      "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  @layer compat {
+    *,
+    ::before,
+    ::after {
+      border-color: #374151;
+    }
+  }
+}
