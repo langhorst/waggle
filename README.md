@@ -236,9 +236,21 @@ POST   /api/messages/{id}/replay[?destination={destID}]
 ```
 
 The web UI (HTMX + Flowbite, embedded and offline) is served at `/` and is
-the full-control surface; the TUI (`waggle tui [-addr host:port] [-token
-…]`) is a read-only observer that attaches to a running daemon over the
-same API and event stream.
+the full-control surface; the TUI is a read-only observer that attaches to
+a running daemon over the same API and event stream:
+
+```sh
+waggle tui                                   # reads ./daemon.yaml for the address and credentials
+waggle tui -config examples/daemon.yaml      # or point it at one elsewhere
+waggle tui -addr 127.0.0.1:8420 -token ...   # or supply them directly
+waggle tui -addr 127.0.0.1:8420 -user ops -password ...
+```
+
+It takes whichever credential the daemon is configured with, from the
+config file, the flags, or `$WAGGLE_TOKEN` / `$WAGGLE_USER` /
+`$WAGGLE_PASSWORD`. Flags win over the environment, which wins over the
+config. A rejected credential says which kind was tried rather than just
+`401`.
 
 ## Configuration
 
@@ -248,13 +260,22 @@ channel file). Unknown keys are load-time errors. `retention: -1` keeps
 messages forever; queue-referenced messages are never pruned.
 
 **Auth.** The API and web UI are the full-control surface, so every route
-requires credentials: `auth.token` is accepted as `Authorization: Bearer`
-and as the basic-auth password with any user name (browsers prompt for
-it), and `auth.basicUser`/`auth.basicPassword` add a dedicated login.
-The daemon listens on `127.0.0.1:8420` by default and refuses to bind a
-non-loopback address without credentials unless `auth.disabled: true`.
-State-changing requests that carry a browser `Origin` or `Sec-Fetch-Site`
-header must be same-origin.
+requires credentials. There are no default credentials — nothing is
+generated for you — and a daemon with none configured would reject every
+request, so one of these is required or startup fails with a message
+naming all three:
+
+| setting | how you authenticate |
+| --- | --- |
+| `auth.token` | `Authorization: Bearer <token>`, and also the basic-auth **password with any user name**, so a browser prompt accepts it |
+| `auth.basicUser` + `auth.basicPassword` | a named login for the browser prompt (both halves required) |
+| `auth.disabled: true` | serve unauthenticated — only behind an authenticating reverse proxy, or on an isolated host |
+
+The daemon listens on `127.0.0.1:8420` by default. `auth.disabled` on a
+non-loopback address is allowed but warns loudly at startup, since anyone
+who can reach the port controls every channel. State-changing requests
+that carry a browser `Origin` or `Sec-Fetch-Site` header must be
+same-origin.
 
 ## Development
 

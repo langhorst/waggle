@@ -4,9 +4,21 @@ dataDir: data            # SQLite message store lives here
 channelsDir: channels    # one YAML file per channel
 hotReload: true          # watch channel scripts for changes
 
-# Credentials for the API and web UI. The token works as
-# `Authorization: Bearer <token>` and as the basic-auth password (any user
-# name) so the browser prompt accepts it too. Listening on a non-loopback
-# address requires auth; `disabled: true` opts out explicitly.
+# Credentials for the API and web UI. Some form of auth is required: a
+# daemon with no credentials would reject every request, so waggle refuses
+# to start rather than lock you out. Pick one of:
+#
+#   token        `Authorization: Bearer <token>`, and also accepted as the
+#                basic-auth password with ANY user name, so the browser
+#                prompt works. This is what `waggle tui` uses by default.
+#   basicUser +  A named login for the browser prompt. `waggle tui` reads
+#   basicPassword  both from this file, or takes -user/-password.
+#   disabled     Serve unauthenticated. Loopback only; refused on a
+#                non-loopback listen address.
+#
+# Override for the TUI with -token, or -user and -password, or the
+# $WAGGLE_TOKEN / $WAGGLE_USER / $WAGGLE_PASSWORD environment variables.
 auth:
   token: change-me
+  # basicUser: ops
+  # basicPassword: a-long-random-password

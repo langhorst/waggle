@@ -176,12 +176,32 @@ destinations:
 }
 
 func TestLoadDaemonDefaults(t *testing.T) {
+	// The returned config carries the defaults even when the file is
+	// missing, so callers that tolerate its absence (the TUI) can still
+	// read the listen address off it.
 	cfg, err := LoadDaemon(filepath.Join(t.TempDir(), "missing.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	if cfg.Listen != DefaultListen || cfg.ChannelsDir != "channels" {
 		t.Errorf("defaults = %+v", cfg)
+	}
+	// But a missing config is still an error, because the defaults alone
+	// configure no credentials and such a daemon rejects every request.
+	if err == nil {
+		t.Fatal("expected an error: the defaults configure no credentials")
+	}
+	for _, want := range []string{"no config file at", "no credentials configured"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+// A default config plus credentials is valid: nothing else is required to
+// run a loopback daemon.
+func TestDefaultsWithCredentialsAreValid(t *testing.T) {
+	cfg := DefaultDaemon()
+	cfg.Auth.Token = "secret"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("defaults + token should validate: %v", err)
 	}
 }
 
@@ -190,18 +210,31 @@ func TestLoadDaemonAuthPolicy(t *testing.T) {
 		yaml    string
 		wantErr string
 	}{
-		"loopback without auth":      {yaml: "listen: 127.0.0.1:9000\n"},
-		"localhost without auth":     {yaml: "listen: localhost:9000\n"},
-		"ipv6 loopback without auth": {yaml: "listen: \"[::1]:9000\"\n"},
+		// No credentials at all is refused everywhere: the API would 401
+		// every request, including its own operator's.
+		"loopback without auth": {
+			yaml:    "listen: 127.0.0.1:9000\n",
+			wantErr: "no credentials configured",
+		},
+		"localhost without auth": {
+			yaml:    "listen: localhost:9000\n",
+			wantErr: "no credentials configured",
+		},
 		"all interfaces without auth": {
 			yaml:    "listen: \":9000\"\n",
-			wantErr: "no auth is configured",
+			wantErr: "no credentials configured",
 		},
 		"public address without auth": {
 			yaml:    "listen: 0.0.0.0:9000\n",
-			wantErr: "no auth is configured",
+			wantErr: "no credentials configured",
 		},
+		"loopback with token":       {yaml: "listen: 127.0.0.1:9000\nauth: {token: secret}\n"},
+		"loopback with basic auth":  {yaml: "listen: 127.0.0.1:9000\nauth: {basicUser: ops, basicPassword: pw}\n"},
+		"ipv6 loopback with token":  {yaml: "listen: \"[::1]:9000\"\nauth: {token: secret}\n"},
+		"loopback auth disabled":    {yaml: "listen: 127.0.0.1:9000\nauth: {disabled: true}\n"},
 		"public address with token": {yaml: "listen: 0.0.0.0:9000\nauth: {token: secret}\n"},
+		// disabled is the explicit opt-out at any address: it exists for
+		// daemons behind an authenticating reverse proxy.
 		"public address auth disabled": {
 			yaml: "listen: 0.0.0.0:9000\nauth: {disabled: true}\n",
 		},
@@ -217,7 +250,7 @@ func TestLoadDaemonAuthPolicy(t *testing.T) {
 			yaml:    "auth: {basicPassword: pw}\n",
 			wantErr: "basicPassword requires basicUser",
 		},
-		"empty listen falls back to default": {yaml: "listen: \"\"\n"},
+		"empty listen falls back to default": {yaml: "listen: \"\"\nauth: {token: secret}\n"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

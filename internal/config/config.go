@@ -74,6 +74,13 @@ func LoadDaemon(path string) (Daemon, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// Falling back to the defaults must not skip validation: the
+			// defaults configure no credentials, and a daemon serving with
+			// none rejects every request. Report that instead of starting
+			// an unusable server.
+			if verr := cfg.Validate(); verr != nil {
+				return cfg, fmt.Errorf("no config file at %s: %w", path, verr)
+			}
 			return cfg, nil
 		}
 		return cfg, fmt.Errorf("config: %w", err)
@@ -114,11 +121,21 @@ func (d *Daemon) Validate() error {
 	if d.Auth.BasicPassword != "" && d.Auth.BasicUser == "" {
 		return fmt.Errorf("auth: basicPassword requires basicUser")
 	}
-	if !d.Auth.Enabled() && !d.Auth.Disabled && !isLoopback(d.Listen) {
-		return fmt.Errorf("listen %q is not a loopback address and no auth is configured: set auth.token (or auth.disabled: true to serve unauthenticated)", d.Listen)
+	// No credentials at all is refused everywhere, not just off-loopback:
+	// the API rejects every request when nothing is configured, so serving
+	// that way is a lockout rather than an open door. Saying so at startup
+	// beats a daemon that runs and 401s its own operator.
+	if !d.Auth.Enabled() && !d.Auth.Disabled {
+		return fmt.Errorf("auth: no credentials configured for %q: set auth.token, or auth.basicUser with auth.basicPassword, or auth.disabled: true to serve unauthenticated", d.Listen)
 	}
 	return nil
 }
+
+// ServesLoopbackOnly reports whether the daemon's listen address binds only
+// a loopback interface. Auth policy no longer varies by address, but an
+// unauthenticated daemon reachable from the network deserves a louder
+// warning than one bound to localhost.
+func (d *Daemon) ServesLoopbackOnly() bool { return isLoopback(d.Listen) }
 
 // isLoopback reports whether addr binds only a loopback interface. An empty
 // host (":8420") binds every interface and is not loopback.

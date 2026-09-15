@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,8 +24,13 @@ type HTTPBackend struct {
 	// BaseURL is the daemon's API root, e.g. "http://127.0.0.1:8420".
 	BaseURL string
 	// Token is sent as a Bearer token; empty when the daemon has auth
-	// disabled.
+	// disabled or uses a basic-auth login instead.
 	Token string
+	// BasicUser and BasicPassword authenticate against a daemon configured
+	// with auth.basicUser/auth.basicPassword. They are used only when Token
+	// is empty, since a token satisfies the daemon on its own.
+	BasicUser     string
+	BasicPassword string
 	// Client defaults to one with a 15s timeout. The event stream uses a
 	// separate client without a timeout.
 	Client *http.Client
@@ -46,8 +52,11 @@ func (b *HTTPBackend) newRequest(ctx context.Context, path string, query url.Val
 	if err != nil {
 		return nil, err
 	}
-	if b.Token != "" {
+	switch {
+	case b.Token != "":
 		req.Header.Set("Authorization", "Bearer "+b.Token)
+	case b.BasicUser != "":
+		req.SetBasicAuth(b.BasicUser, b.BasicPassword)
 	}
 	req.Header.Set("Accept", "application/json")
 	return req, nil
@@ -74,20 +83,34 @@ func (b *HTTPBackend) get(ctx context.Context, path string, query url.Values, ou
 }
 
 // apiError turns a non-2xx response into an error carrying the API's own
-// message when it sent one.
+// message when it sent one, classified by status so callers can react to
+// the kind of failure rather than parse a string.
 func apiError(resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	var payload struct {
 		Error string `json:"error"`
 	}
+	// The daemon reports failures as {"error": "..."}; anything else (a
+	// proxy's HTML page, say) leaves just the status line.
+	detail := resp.Status
 	if json.Unmarshal(body, &payload) == nil && payload.Error != "" {
-		if resp.StatusCode == http.StatusNotFound {
-			return fmt.Errorf("%w: %s", store.ErrNotFound, payload.Error)
-		}
-		return fmt.Errorf("daemon: %s (%s)", payload.Error, resp.Status)
+		detail = fmt.Sprintf("%s (%s)", payload.Error, resp.Status)
 	}
-	return fmt.Errorf("daemon: %s", resp.Status)
+	switch resp.StatusCode {
+	case http.StatusNotFound:
+		return fmt.Errorf("%w: %s", store.ErrNotFound, detail)
+	case http.StatusUnauthorized:
+		return fmt.Errorf("%w: %s", ErrUnauthorized, detail)
+	case http.StatusForbidden:
+		return fmt.Errorf("daemon refused the request: %s", detail)
+	}
+	return fmt.Errorf("daemon: %s", detail)
 }
+
+// ErrUnauthorized reports that the daemon rejected the credentials, or the
+// absence of them. Callers unwrap it to print credential guidance rather
+// than a bare status line.
+var ErrUnauthorized = errors.New("daemon rejected the credentials")
 
 func (b *HTTPBackend) ChannelSummaries(ctx context.Context) ([]engine.ChannelSummary, error) {
 	var out []engine.ChannelSummary

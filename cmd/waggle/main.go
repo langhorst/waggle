@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -61,33 +62,69 @@ func main() {
 }
 
 // runTUI attaches the read-only observer TUI to a running daemon over its
-// HTTP API and event stream. The address and token default to the daemon
-// config so `waggle tui` next to `waggle daemon` just works.
+// HTTP API and event stream. Credentials default to the daemon config, so
+// `waggle tui` next to `waggle daemon` just works for both a token and a
+// basicUser/basicPassword login; flags and the environment override it.
 func runTUI(args []string) int {
 	fs := flag.NewFlagSet("tui", flag.ExitOnError)
-	configPath := fs.String("config", "daemon.yaml", "path to daemon config (for the listen address and token)")
+	configPath := fs.String("config", "daemon.yaml", "path to daemon config (for the listen address and credentials)")
 	addr := fs.String("addr", "", "daemon API address, e.g. 127.0.0.1:8420 (default: the config's listen address)")
 	token := fs.String("token", "", "API token (default: auth.token from the config, or $WAGGLE_TOKEN)")
+	user := fs.String("user", "", "basic-auth user (default: auth.basicUser from the config, or $WAGGLE_USER)")
+	password := fs.String("password", "", "basic-auth password (default: auth.basicPassword from the config, or $WAGGLE_PASSWORD)")
 	_ = fs.Parse(args)
 
-	cfg, err := config.LoadDaemon(*configPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "loading daemon config: %v\n", err)
-		return 1
+	// A config is a convenience here, not a requirement: the TUI needs only
+	// an address and credentials, and may well be pointed at a daemon whose
+	// config lives on another host. So a missing default config falls back
+	// to the built-in defaults, while an explicit -config that is not there
+	// is a typo worth reporting rather than silently ignoring.
+	explicitConfig := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "config" {
+			explicitConfig = true
+		}
+	})
+	cfg := config.DefaultDaemon()
+	if _, statErr := os.Stat(*configPath); statErr != nil {
+		if explicitConfig {
+			fmt.Fprintf(os.Stderr, "reading daemon config: %v\n", statErr)
+			return 1
+		}
+	} else {
+		loaded, err := config.LoadDaemon(*configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "loading daemon config: %v\n", err)
+			return 1
+		}
+		cfg = loaded
 	}
+
 	if *addr == "" {
 		*addr = dialableAddr(cfg.Listen)
 	}
 	if *token == "" {
-		*token = cfg.Auth.Token
+		*token = firstNonEmpty(cfg.Auth.Token, os.Getenv("WAGGLE_TOKEN"))
 	}
-	if *token == "" {
-		*token = os.Getenv("WAGGLE_TOKEN")
+	if *user == "" {
+		*user = firstNonEmpty(cfg.Auth.BasicUser, os.Getenv("WAGGLE_USER"))
 	}
-	backend := &tui.HTTPBackend{BaseURL: "http://" + *addr, Token: *token}
+	if *password == "" {
+		*password = firstNonEmpty(cfg.Auth.BasicPassword, os.Getenv("WAGGLE_PASSWORD"))
+	}
+
+	backend := &tui.HTTPBackend{
+		BaseURL:       "http://" + *addr,
+		Token:         *token,
+		BasicUser:     *user,
+		BasicPassword: *password,
+	}
 	// Fail fast with a readable message rather than an empty screen.
 	if _, err := backend.ChannelSummaries(context.Background()); err != nil {
 		fmt.Fprintf(os.Stderr, "connecting to the daemon at %s: %v\n", *addr, err)
+		if errors.Is(err, tui.ErrUnauthorized) {
+			fmt.Fprint(os.Stderr, credentialHelp(*token != "", *user != ""))
+		}
 		return 1
 	}
 	p := tea.NewProgram(tui.New(backend), tea.WithAltScreen())
@@ -96,6 +133,30 @@ func runTUI(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// credentialHelp explains which credentials the TUI sent and how to supply
+// the right ones, since a bare 401 does not say whether the problem is a
+// missing token, a missing login, or a wrong password.
+func credentialHelp(sentToken, sentUser bool) string {
+	switch {
+	case sentToken:
+		return "\nThe token was rejected. Check auth.token in the daemon config, -token, or $WAGGLE_TOKEN.\n"
+	case sentUser:
+		return "\nThe basic-auth login was rejected. Check auth.basicUser and auth.basicPassword in the\ndaemon config, -user and -password, or $WAGGLE_USER and $WAGGLE_PASSWORD.\n"
+	default:
+		return "\nNo credentials were sent. Point -config at the daemon config, or pass -token\n(for auth.token) or -user and -password (for auth.basicUser/auth.basicPassword).\n"
+	}
+}
+
+// firstNonEmpty returns the first non-empty argument, or "".
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // dialableAddr turns a listen address into one a client can connect to: a
@@ -173,7 +234,15 @@ func runDaemon(args []string) int {
 		Log:         log,
 	}
 	if cfg.Auth.Disabled {
-		log.Warn("http api authentication is disabled", "addr", cfg.Listen)
+		if cfg.ServesLoopbackOnly() {
+			log.Warn("http api authentication is disabled", "addr", cfg.Listen)
+		} else {
+			// Reachable from the network with no credentials: legitimate
+			// only behind something that authenticates for us.
+			log.Warn("http api authentication is disabled on a non-loopback address; "+
+				"anyone who can reach this port can control every channel",
+				"addr", cfg.Listen)
+		}
 	}
 	// No WriteTimeout: the SSE endpoints stream indefinitely, and the API
 	// applies a per-response deadline to everything else.
