@@ -15,6 +15,7 @@ import (
 	"github.com/langhorst/waggle/internal/adapter"
 	"github.com/langhorst/waggle/internal/events"
 	"github.com/langhorst/waggle/internal/message"
+	metakey "github.com/langhorst/waggle/internal/meta"
 	"github.com/langhorst/waggle/internal/store"
 )
 
@@ -33,7 +34,9 @@ type Worker struct {
 	// ±20% jitter) up to CapInterval.
 	BaseInterval time.Duration
 	CapInterval  time.Duration
-	// PollInterval is the idle sleep between queue checks.
+	// PollInterval is the fallback sleep between queue checks. Enqueue
+	// wakes the worker directly, so polling only covers retry deadlines
+	// (not_before) and belt-and-braces. Default 1s.
 	PollInterval time.Duration
 
 	Bus *events.Bus
@@ -48,7 +51,7 @@ func (w *Worker) defaults() {
 		w.CapInterval = 5 * time.Minute
 	}
 	if w.PollInterval <= 0 {
-		w.PollInterval = 250 * time.Millisecond
+		w.PollInterval = time.Second
 	}
 	if w.MaxAttempts == 0 {
 		w.MaxAttempts = 10
@@ -62,37 +65,62 @@ func (w *Worker) defaults() {
 func (w *Worker) Run(ctx context.Context) {
 	w.defaults()
 	log := w.Log.With("channel", w.ChannelID, "destination", w.DestID)
+	wake := w.Store.Wake(w.ChannelID, w.DestID)
 	for ctx.Err() == nil {
 		item, err := w.Store.Head(ctx, w.ChannelID, w.DestID)
 		if err != nil {
 			if ctx.Err() == nil {
 				log.Error("reading queue head", "error", err)
 			}
-			sleepCtx(ctx, w.PollInterval)
+			w.idle(ctx, wake, w.PollInterval)
 			continue
 		}
 		if item == nil {
-			sleepCtx(ctx, w.PollInterval)
+			w.idle(ctx, wake, w.PollInterval)
 			continue
 		}
-		// FIFO: if the head is backing off, wait for it — never deliver a
+		// FIFO: if the head is backing off, wait for it: never deliver a
 		// newer message ahead of an older one.
 		if wait := time.Until(item.NotBefore); wait > 0 {
-			sleepCtx(ctx, minDuration(wait, w.PollInterval))
+			w.idle(ctx, wake, minDuration(wait, w.PollInterval))
 			continue
 		}
 		w.attempt(ctx, log, item)
 	}
 }
 
+// idle waits for new work, the poll interval, or shutdown, whichever
+// comes first.
+func (w *Worker) idle(ctx context.Context, wake <-chan struct{}, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-wake:
+	case <-t.C:
+	}
+}
+
 func (w *Worker) attempt(ctx context.Context, log *slog.Logger, item *store.QueueItem) {
+	if item.Orphaned {
+		// A queue row with no payload behind it: the pipeline's QUEUED
+		// record never landed. Sending empty bytes would be worse than
+		// nothing, so dead-letter it where an operator can see it.
+		log.Error("queued delivery has no recorded payload, dead-lettering", "message", item.MessageID)
+		if err := w.Store.DeadLetter(ctx, item, w.DestID, "no payload recorded for this delivery"); err != nil {
+			log.Error("dead-lettering", "message", item.MessageID, "error", err)
+			return
+		}
+		w.publish(item.MessageID, message.StateError)
+		return
+	}
 	meta := make(map[string]string, len(item.Meta)+3)
 	for k, v := range item.Meta {
 		meta[k] = v
 	}
-	meta["message.id"] = fmt.Sprintf("%d", item.MessageID)
-	meta["channel.id"] = w.ChannelID
-	meta["destination.id"] = w.DestID
+	meta[metakey.MessageID] = fmt.Sprintf("%d", item.MessageID)
+	meta[metakey.ChannelID] = w.ChannelID
+	meta[metakey.DestinationID] = w.DestID
 	err := w.Adapter.Send(ctx, item.Payload, meta)
 	switch {
 	case err == nil:
@@ -159,15 +187,6 @@ func (w *Worker) publish(messageID int64, state message.State) {
 		State:         state,
 		DestinationID: w.DestID,
 	})
-}
-
-func sleepCtx(ctx context.Context, d time.Duration) {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-	case <-t.C:
-	}
 }
 
 func minDuration(a, b time.Duration) time.Duration {

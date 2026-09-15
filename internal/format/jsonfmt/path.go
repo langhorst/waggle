@@ -1,6 +1,7 @@
 package jsonfmt
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -76,19 +77,36 @@ func parseBracket(p string) (seg, int, error) {
 		return seg{}, 0, fmt.Errorf("unterminated '['")
 	}
 	if q := p[1]; q == '"' || q == '\'' {
-		var b strings.Builder
+		// Find the closing quote, skipping backslash escapes.
 		i := 2
 		for i < len(p) && p[i] != q {
 			if p[i] == '\\' && i+1 < len(p) {
 				i++
 			}
-			b.WriteByte(p[i])
 			i++
 		}
 		if i >= len(p) || i+1 >= len(p) || p[i+1] != ']' {
 			return seg{}, 0, fmt.Errorf("unterminated quoted key")
 		}
-		return seg{key: b.String()}, i + 2, nil
+		var key string
+		if q == '"' {
+			// Double-quoted keys use JSON string escapes, the same
+			// grammar Flatten emits, so \n and \u0001 in a flattened path
+			// resolve back to the key they came from.
+			if err := json.Unmarshal([]byte(p[1:i+1]), &key); err != nil {
+				return seg{}, 0, fmt.Errorf("invalid quoted key %s: %w", p[1:i+1], err)
+			}
+		} else {
+			var b strings.Builder
+			for j := 2; j < i; j++ {
+				if p[j] == '\\' && j+1 < i {
+					j++
+				}
+				b.WriteByte(p[j])
+			}
+			key = b.String()
+		}
+		return seg{key: key}, i + 2, nil
 	}
 	end := strings.IndexByte(p, ']')
 	if end == -1 {

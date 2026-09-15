@@ -6,6 +6,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,20 +20,48 @@ import (
 
 // Daemon is the top-level daemon configuration.
 type Daemon struct {
-	// Listen is the HTTP API/web UI address, e.g. ":8420".
+	// Listen is the HTTP API/web UI address. Default "127.0.0.1:8420";
+	// binding a non-loopback address requires auth to be configured.
 	Listen string `yaml:"listen"`
 	// DataDir holds the SQLite database and other runtime state.
 	DataDir string `yaml:"dataDir"`
 	// ChannelsDir contains one YAML file per channel.
 	ChannelsDir string `yaml:"channelsDir"`
-	// HotReload enables watching channel configs and scripts for changes.
+	// HotReload enables watching channel scripts for changes. Channel
+	// YAML is reloaded on request (the reload action), not watched.
 	HotReload bool `yaml:"hotReload"`
+	// Auth protects the HTTP API and web UI.
+	Auth Auth `yaml:"auth"`
 }
+
+// Auth is the HTTP API/web UI credential policy. With no credentials
+// configured the daemon only agrees to listen on a loopback address; set
+// Disabled to opt out of that check explicitly.
+type Auth struct {
+	// Token is accepted as `Authorization: Bearer <token>` and as the
+	// password of HTTP basic auth with any user name (so a browser can use
+	// it for the web UI).
+	Token string `yaml:"token"`
+	// BasicUser/BasicPassword configure a dedicated basic-auth login.
+	BasicUser     string `yaml:"basicUser"`
+	BasicPassword string `yaml:"basicPassword"`
+	// Disabled turns authentication off entirely. Only appropriate behind
+	// a reverse proxy that authenticates, or on an isolated host.
+	Disabled bool `yaml:"disabled"`
+}
+
+// Enabled reports whether any credential is configured.
+func (a Auth) Enabled() bool {
+	return a.Token != "" || a.BasicUser != ""
+}
+
+// DefaultListen is the default HTTP API/web UI bind address.
+const DefaultListen = "127.0.0.1:8420"
 
 // DefaultDaemon returns the daemon config defaults.
 func DefaultDaemon() Daemon {
 	return Daemon{
-		Listen:      ":8420",
+		Listen:      DefaultListen,
 		DataDir:     "data",
 		ChannelsDir: "channels",
 		HotReload:   true,
@@ -52,16 +81,57 @@ func LoadDaemon(path string) (Daemon, error) {
 	if err := strictUnmarshal(raw, &cfg); err != nil {
 		return cfg, fmt.Errorf("config %s: %w", path, err)
 	}
-	if cfg.Listen == "" {
-		cfg.Listen = ":8420"
-	}
-	if cfg.DataDir == "" {
-		cfg.DataDir = "data"
-	}
-	if cfg.ChannelsDir == "" {
-		cfg.ChannelsDir = "channels"
+	cfg.applyDefaults()
+	if err := cfg.Validate(); err != nil {
+		return cfg, fmt.Errorf("config %s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+// applyDefaults fills in fields that were explicitly set to empty; a YAML
+// file with `listen: ""` should behave like one without the key.
+func (d *Daemon) applyDefaults() {
+	def := DefaultDaemon()
+	if d.Listen == "" {
+		d.Listen = def.Listen
+	}
+	if d.DataDir == "" {
+		d.DataDir = def.DataDir
+	}
+	if d.ChannelsDir == "" {
+		d.ChannelsDir = def.ChannelsDir
+	}
+}
+
+// Validate checks the daemon configuration for unsafe combinations.
+func (d *Daemon) Validate() error {
+	if d.Auth.Disabled && d.Auth.Enabled() {
+		return fmt.Errorf("auth: disabled is set together with credentials; remove one")
+	}
+	if d.Auth.BasicUser != "" && d.Auth.BasicPassword == "" {
+		return fmt.Errorf("auth: basicUser requires basicPassword")
+	}
+	if d.Auth.BasicPassword != "" && d.Auth.BasicUser == "" {
+		return fmt.Errorf("auth: basicPassword requires basicUser")
+	}
+	if !d.Auth.Enabled() && !d.Auth.Disabled && !isLoopback(d.Listen) {
+		return fmt.Errorf("listen %q is not a loopback address and no auth is configured: set auth.token (or auth.disabled: true to serve unauthenticated)", d.Listen)
+	}
+	return nil
+}
+
+// isLoopback reports whether addr binds only a loopback interface. An empty
+// host (":8420") binds every interface and is not loopback.
+func isLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Channel is one channel definition.
@@ -71,7 +141,11 @@ type Channel struct {
 	Enabled *bool  `yaml:"enabled"` // default true
 	// Retention caps stored messages for this channel; -1 = unlimited.
 	// Default 1000.
-	Retention    *int          `yaml:"retention"`
+	Retention *int `yaml:"retention"`
+	// MaxPending bounds messages accepted but not yet processed; when the
+	// buffer is full the source blocks (and its transport ACK waits).
+	// Default 256.
+	MaxPending   int           `yaml:"maxPending"`
 	Source       Source        `yaml:"source"`
 	Filter       string        `yaml:"filter"`       // path to .js Message Filter
 	Transformers []string      `yaml:"transformers"` // ordered .js Message Translator chain
@@ -184,23 +258,40 @@ func LoadChannel(path string) (*Channel, error) {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
 	ch.Path = path
+	ch.Normalize()
 	if err := ch.Validate(); err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
 	return &ch, nil
 }
 
+// Normalize fills in the defaults that derive from other fields: the name
+// defaults to the id and a destination's data type to the source's.
+// LoadChannel calls it before Validate; a Channel built in code should too.
+func (c *Channel) Normalize() {
+	if c.Name == "" {
+		c.Name = c.ID
+	}
+	for i := range c.Destinations {
+		if c.Destinations[i].DataType == "" {
+			c.Destinations[i].DataType = c.Source.DataType
+		}
+	}
+}
+
 // Validate checks structural correctness against the format and adapter
-// registries, so typos fail at load time.
+// registries, so a typo in a channel file fails at load time rather than
+// when the engine builds the channel. It does not modify the config.
 func (c *Channel) Validate() error {
 	if c.ID == "" {
 		return fmt.Errorf("channel: id is required")
 	}
-	if c.Name == "" {
-		c.Name = c.ID
-	}
 	if c.Source.Type == "" {
 		return fmt.Errorf("channel %s: source.type is required", c.ID)
+	}
+	if !adapter.HasInbound(c.Source.Type) {
+		return fmt.Errorf("channel %s: unknown source type %q (registered: %v)",
+			c.ID, c.Source.Type, adapter.InboundTypes())
 	}
 	if c.Source.DataType == "" {
 		return fmt.Errorf("channel %s: source.dataType is required", c.ID)
@@ -223,7 +314,7 @@ func (c *Channel) Validate() error {
 		}
 		destIDs[d.ID] = true
 		if d.DataType == "" {
-			d.DataType = c.Source.DataType
+			return fmt.Errorf("channel %s: destination %s: dataType is required (Normalize fills it from the source)", c.ID, d.ID)
 		}
 		if _, ok := format.Get(d.DataType); !ok {
 			return fmt.Errorf("channel %s: destination %s: unknown dataType %q (registered: %v)",
@@ -232,12 +323,19 @@ func (c *Channel) Validate() error {
 		if d.Adapter.Type == "" {
 			return fmt.Errorf("channel %s: destination %s: adapter.type is required", c.ID, d.ID)
 		}
+		if !adapter.HasOutbound(d.Adapter.Type) {
+			return fmt.Errorf("channel %s: destination %s: unknown adapter type %q (registered: %v)",
+				c.ID, d.ID, d.Adapter.Type, adapter.OutboundTypes())
+		}
 		if ma := d.Queue.MaxAttemptCount(); ma == 0 || ma < -1 {
 			return fmt.Errorf("channel %s: destination %s: queue.maxAttempts must be positive or -1", c.ID, d.ID)
 		}
 	}
 	if r := c.RetentionCount(); r == 0 || r < -1 {
 		return fmt.Errorf("channel %s: retention must be positive or -1 (unlimited)", c.ID)
+	}
+	if c.MaxPending < 0 {
+		return fmt.Errorf("channel %s: maxPending must be positive", c.ID)
 	}
 	return nil
 }

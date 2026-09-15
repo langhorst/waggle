@@ -8,6 +8,7 @@ package format
 import (
 	"fmt"
 	"sort"
+	"strconv"
 
 	"github.com/langhorst/waggle/internal/message"
 )
@@ -32,11 +33,22 @@ type DataType interface {
 	// error means the path itself is malformed for this dialect.
 	Resolve(root *message.Node, path string) ([]*message.Node, error)
 	// Set writes value at path, creating intermediate structure as needed
-	// (missing segments, padded fields, leaf promotion).
-	Set(root *message.Node, path, value string) error
+	// (missing segments, padded fields, leaf promotion). value is a Go
+	// scalar: string, bool, nil, or any numeric type. Formats whose wire
+	// model has types (JSON) keep it typed; the rest store String(value).
+	Set(root *message.Node, path string, value any) error
 	// Segments returns the top-level structural units matching name
-	// (HL7/ASTM segments and records; CSV rows for name "R").
+	// (HL7/ASTM segments and records; CSV rows for name "R"; JSON keys,
+	// fanned out over array elements; XML child elements).
 	Segments(root *message.Node, name string) []*message.Node
+
+	// ResolveFrom evaluates rel, a path in this format's dialect written
+	// relative to one segment (seg.get('5.1') on a PID handle, row.get('3')
+	// on a CSV row, el.get('id/@value') on an XML element, obj.get('family')
+	// on a JSON object), against exactly that segment occurrence.
+	ResolveFrom(root, seg *message.Node, rel string) ([]*message.Node, error)
+	// SetFrom is Set relative to one segment occurrence.
+	SetFrom(root, seg *message.Node, rel string, value any) error
 
 	// Value renders a resolved node as a string: the leaf value, or for an
 	// interior node the subtree re-serialized with this format's separators
@@ -48,24 +60,27 @@ type DataType interface {
 	Flatten(root *message.Node) []message.PathValue
 }
 
-// SegmentJoiner is optionally implemented by data types whose dialect does
-// not use the default "SEG-rel" HL7/ASTM-style join for segment-relative
-// script paths (seg.get('5.1') on a PID handle). xmlfmt joins with its
-// slash separator so seg.get('id/@value') works on an element handle.
-type SegmentJoiner interface {
-	// JoinSegmentPath builds the absolute path for rel evaluated against
-	// one segment occurrence named segName.
-	JoinSegmentPath(segName, rel string) string
-}
-
-// TypedSetter is optionally implemented by data types whose wire format
-// distinguishes value types (JSON numbers/booleans/null). The script engine
-// prefers SetTyped when available so a JS number stays a number on the wire;
-// formats without it receive stringified values through Set.
-type TypedSetter interface {
-	// SetTyped behaves like Set but preserves the dynamic type of value
-	// (string, bool, nil, or any numeric type).
-	SetTyped(root *message.Node, path string, value any) error
+// String renders a Set value for formats whose wire model is untyped text:
+// nil is empty, booleans and numbers use their shortest exact form, and
+// anything else falls back to fmt.
+func String(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return t
+	case bool:
+		return strconv.FormatBool(t)
+	case int:
+		return strconv.Itoa(t)
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case float64:
+		return strconv.FormatFloat(t, 'g', -1, 64)
+	case fmt.Stringer:
+		return t.String()
+	}
+	return fmt.Sprint(v)
 }
 
 var registry = map[string]DataType{}

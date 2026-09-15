@@ -20,12 +20,15 @@ import (
 	"github.com/langhorst/waggle/internal/store"
 )
 
-// ScriptEngine compiles referenced script files into pipeline steps. The
-// goja implementation arrives in phase 4; a nil ScriptEngine means script
-// references are rejected at load time rather than silently skipped.
+// ScriptEngine compiles referenced script files into pipeline steps
+// (internal/script is the goja implementation). A nil ScriptEngine means
+// script references are rejected at load time rather than silently skipped.
 type ScriptEngine interface {
 	CompileFilter(path string) (channel.FilterFunc, error)
 	CompileTranslator(path string) (channel.TranslateFunc, error)
+	// CompileErrors reports the last compile error per script path ("" when
+	// healthy) for the UIs.
+	CompileErrors() map[string]string
 }
 
 // Options configures a new Engine.
@@ -160,13 +163,14 @@ func (e *Engine) build(cfg *config.Channel) (*channel.Channel, error) {
 	}
 
 	ch := &channel.Channel{
-		ID:       cfg.ID,
-		Name:     cfg.Name,
-		InType:   inType,
-		Source:   source,
-		Recorder: e.recorder,
-		Bus:      e.bus,
-		Log:      e.log,
+		ID:         cfg.ID,
+		Name:       cfg.Name,
+		InType:     inType,
+		Source:     source,
+		Recorder:   e.recorder,
+		Bus:        e.bus,
+		Log:        e.log,
+		MaxPending: cfg.MaxPending,
 	}
 	if e.store != nil {
 		ch.Queue = e.store
@@ -274,7 +278,7 @@ func (e *Engine) managed(id string) (*managed, error) {
 	defer e.mu.Unlock()
 	m, ok := e.channels[id]
 	if !ok {
-		return nil, fmt.Errorf("engine: unknown channel %q", id)
+		return nil, fmt.Errorf("%w %q", ErrUnknownChannel, id)
 	}
 	return m, nil
 }

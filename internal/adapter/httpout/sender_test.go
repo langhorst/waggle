@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/langhorst/waggle/internal/adapter"
+	metakey "github.com/langhorst/waggle/internal/meta"
 )
 
 type captured struct {
@@ -21,7 +23,7 @@ type captured struct {
 
 // startServer runs a test API that records the last request and answers with
 // the status set via *status.
-func startServer(t *testing.T, status *int) (*httptest.Server, *captured) {
+func startServer(t *testing.T, status *atomic.Int32) (*httptest.Server, *captured) {
 	t.Helper()
 	var mu sync.Mutex
 	got := &captured{}
@@ -34,11 +36,12 @@ func startServer(t *testing.T, status *int) (*httptest.Server, *captured) {
 			auth: r.Header.Get("Authorization"), apiKey: r.Header.Get("X-Api-Key"),
 		}
 		mu.Unlock()
-		if *status >= 400 {
-			http.Error(w, "the API said no", *status)
+		code := int(status.Load())
+		if code >= 400 {
+			http.Error(w, "the API said no", code)
 			return
 		}
-		w.WriteHeader(*status)
+		w.WriteHeader(code)
 	}))
 	t.Cleanup(ts.Close)
 	return ts, got
@@ -58,7 +61,8 @@ func newSender(t *testing.T, settings map[string]any) *Sender {
 }
 
 func TestSendSuccess(t *testing.T) {
-	status := 201
+	var status atomic.Int32
+	status.Store(201)
 	ts, got := startServer(t, &status)
 	s := newSender(t, map[string]any{
 		"url":     ts.URL + "/fhir/Patient?tenant=lab",
@@ -76,7 +80,8 @@ func TestSendSuccess(t *testing.T) {
 }
 
 func TestBasicAuthAndContentType(t *testing.T) {
-	status := 200
+	var status atomic.Int32
+	status.Store(200)
 	ts, got := startServer(t, &status)
 	s := newSender(t, map[string]any{
 		"url": ts.URL, "basicUser": "u", "basicPass": "p", "contentType": "text/plain",
@@ -90,7 +95,8 @@ func TestBasicAuthAndContentType(t *testing.T) {
 }
 
 func TestMetaOverrides(t *testing.T) {
-	status := 200
+	var status atomic.Int32
+	status.Store(200)
 	ts, got := startServer(t, &status)
 	s := newSender(t, map[string]any{"url": ts.URL + "/fhir/Patient"})
 
@@ -113,20 +119,21 @@ func TestMetaOverrides(t *testing.T) {
 }
 
 func TestStatusClassification(t *testing.T) {
-	status := 200
+	var status atomic.Int32
+	status.Store(200)
 	ts, _ := startServer(t, &status)
 	s := newSender(t, map[string]any{"url": ts.URL})
 	send := func() error { return s.Send(context.Background(), []byte("x"), nil) }
 
 	for _, transient := range []int{500, 502, 503, 408, 429} {
-		status = transient
+		status.Store(int32(transient))
 		err := send()
 		if err == nil || adapter.IsPermanent(err) {
 			t.Errorf("status %d: want transient error, got %v", transient, err)
 		}
 	}
 	for _, permanent := range []int{400, 404, 409, 422} {
-		status = permanent
+		status.Store(int32(permanent))
 		err := send()
 		if err == nil || !adapter.IsPermanent(err) {
 			t.Errorf("status %d: want permanent error, got %v", permanent, err)
@@ -135,7 +142,7 @@ func TestStatusClassification(t *testing.T) {
 			t.Errorf("status %d: response body missing from error: %v", permanent, err)
 		}
 	}
-	status = 204
+	status.Store(204)
 	if err := send(); err != nil {
 		t.Errorf("204 = %v", err)
 	}
@@ -150,12 +157,89 @@ func TestConnectionRefusedIsTransient(t *testing.T) {
 }
 
 func TestInvalidMetaPathIsPermanent(t *testing.T) {
-	status := 200
+	var status atomic.Int32
+	status.Store(200)
 	ts, _ := startServer(t, &status)
 	s := newSender(t, map[string]any{"url": ts.URL})
 	err := s.Send(context.Background(), []byte("x"), map[string]string{MetaPath: "::bad::url"})
 	if err == nil || !adapter.IsPermanent(err) {
 		t.Fatalf("want permanent error, got %v", err)
+	}
+}
+
+// TestMetaPathCannotChangeHost: the outbound host is set by the operator
+// in YAML; a script's http.path must never redirect the request elsewhere.
+func TestMetaPathCannotChangeHost(t *testing.T) {
+	var status atomic.Int32
+	status.Store(200)
+	ts, got := startServer(t, &status)
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("request reached the wrong host: %s %s", r.Method, r.URL)
+	}))
+	t.Cleanup(elsewhere.Close)
+	s := newSender(t, map[string]any{"url": ts.URL + "/fhir/"})
+
+	for _, p := range []string{
+		elsewhere.URL + "/x",
+		"//" + strings.TrimPrefix(elsewhere.URL, "http://") + "/x",
+		"https://evil.example/x",
+		"http://user:pw@" + strings.TrimPrefix(elsewhere.URL, "http://") + "/x",
+	} {
+		err := s.Send(context.Background(), []byte("x"), map[string]string{MetaPath: p})
+		if err == nil || !adapter.IsPermanent(err) {
+			t.Errorf("%q: want permanent rejection, got %v", p, err)
+		}
+	}
+	if got.path != "" {
+		t.Errorf("a rejected path still produced a request: %q", got.path)
+	}
+
+	// Plain paths keep working, both relative and absolute.
+	if err := s.Send(context.Background(), []byte("x"), map[string]string{MetaPath: "Patient/1?x=1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got.path != "/fhir/Patient/1" || got.query != "x=1" {
+		t.Errorf("relative path routed to %q?%q", got.path, got.query)
+	}
+}
+
+// TestInboundMetaDoesNotRoute: an http-listener stamps the inbound request's
+// path and method on the message. Those keys used to be the same ones the
+// sender reads as overrides, so a listener-to-sender channel replayed the
+// inbound path against the outbound base URL.
+func TestInboundMetaDoesNotRoute(t *testing.T) {
+	var status atomic.Int32
+	status.Store(200)
+	ts, got := startServer(t, &status)
+	s := newSender(t, map[string]any{"url": ts.URL + "/fhir/Patient", "method": "POST"})
+	inbound := map[string]string{
+		metakey.SourceHTTPMethod: "PUT",
+		metakey.SourceHTTPPath:   "/intake",
+		metakey.SourceRemote:     "10.0.0.1:1234",
+	}
+	if err := s.Send(context.Background(), []byte("x"), inbound); err != nil {
+		t.Fatal(err)
+	}
+	if got.method != "POST" || got.path != "/fhir/Patient" {
+		t.Fatalf("inbound meta rerouted the request to %s %s", got.method, got.path)
+	}
+}
+
+func TestSuccessBodyDrainIsBounded(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		// Far more than maxDrainBytes; Send must return promptly regardless.
+		chunk := strings.Repeat("x", 64<<10)
+		for i := 0; i < 64; i++ {
+			if _, err := io.WriteString(w, chunk); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(ts.Close)
+	s := newSender(t, map[string]any{"url": ts.URL})
+	if err := s.Send(context.Background(), []byte("x"), nil); err != nil {
+		t.Fatal(err)
 	}
 }
 

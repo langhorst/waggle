@@ -28,6 +28,7 @@
 package script
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -139,6 +140,13 @@ func (e *Engine) load(path, fnName string) (*Script, error) {
 	return s, nil
 }
 
+// ErrNotLoaded is returned by Reload for a path no channel has compiled.
+var ErrNotLoaded = errors.New("script: not loaded")
+
+// CompileErrors implements the engine's ScriptEngine seam: the load state
+// of every compiled script (path to last compile error, "" when healthy).
+func (e *Engine) CompileErrors() map[string]string { return e.Scripts() }
+
 // Scripts returns the load state of every compiled script (path → last
 // compile error, empty when healthy).
 func (e *Engine) Scripts() map[string]string {
@@ -166,7 +174,7 @@ func (e *Engine) Reload(path string) error {
 	}
 	e.mu.Unlock()
 	if len(targets) == 0 {
-		return fmt.Errorf("script: %s is not loaded", path)
+		return fmt.Errorf("%w: %s", ErrNotLoaded, path)
 	}
 	for _, s := range targets {
 		if err := s.compile(); err != nil {
@@ -287,7 +295,7 @@ func (s *Script) run(m *message.Message, timeout time.Duration) (goja.Value, err
 		return nil, fmt.Errorf("script %s: not compiled", s.path)
 	}
 
-	env, err := newEnv(s.rt, m)
+	env, err := newEnv(s.rt, m, s.log)
 	if err != nil {
 		return nil, err
 	}

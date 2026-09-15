@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/langhorst/waggle/internal/format"
+	"github.com/langhorst/waggle/internal/message"
 )
 
 var dt = DataType{}
@@ -53,6 +54,31 @@ func TestParseRejectsGarbage(t *testing.T) {
 		if _, err := dt.Parse([]byte(raw)); err == nil {
 			t.Errorf("Parse(%q): expected error", raw)
 		}
+	}
+}
+
+// TestParseDepthLimit: nesting beyond MaxDepth is a parse error, not a
+// stack overflow. The rejected input is far smaller than any transport's
+// body limit, so this is the only thing standing between a hostile payload
+// and a dead process.
+func TestParseDepthLimit(t *testing.T) {
+	deep := strings.Repeat("[", MaxDepth+1) + strings.Repeat("]", MaxDepth+1)
+	if _, err := dt.Parse([]byte(deep)); err == nil || !strings.Contains(err.Error(), "nesting") {
+		t.Fatalf("Parse(%d levels): want nesting error, got %v", MaxDepth+1, err)
+	}
+	objects := strings.Repeat(`{"a":`, MaxDepth+1) + "1" + strings.Repeat("}", MaxDepth+1)
+	if _, err := dt.Parse([]byte(objects)); err == nil {
+		t.Fatalf("Parse(%d object levels): want error", MaxDepth+1)
+	}
+	// Exactly at the limit still parses.
+	ok := strings.Repeat("[", MaxDepth) + strings.Repeat("]", MaxDepth)
+	if _, err := dt.Parse([]byte(ok)); err != nil {
+		t.Fatalf("Parse(%d levels): %v", MaxDepth, err)
+	}
+	// A megabyte of open brackets, the shape of the original crash.
+	huge := strings.Repeat("[", 1<<20)
+	if _, err := dt.Parse([]byte(huge)); err == nil {
+		t.Fatal("Parse(1 MiB of '['): want error")
 	}
 }
 
@@ -194,7 +220,7 @@ func TestSetTypedAndAutovivify(t *testing.T) {
 		{"score", 1.5},
 	}
 	for _, s := range steps {
-		if err := dt.SetTyped(root, s.path, s.value); err != nil {
+		if err := dt.Set(root, s.path, s.value); err != nil {
 			t.Fatalf("SetTyped(%s): %v", s.path, err)
 		}
 	}
@@ -219,6 +245,73 @@ func TestSetTypedAndAutovivify(t *testing.T) {
 	out, _ = dt.Serialize(root)
 	if !bytes.Contains(out, []byte(`"active":"yes"`)) || !bytes.Contains(out, []byte(`"resourceType":{"sub":"x"}`)) {
 		t.Errorf("after overwrite: %s", out)
+	}
+}
+
+// TestSetNeverReplacesPopulatedContainers: a key step on a non-empty array
+// descends into element 0 (what get reads first); an index step on a
+// non-empty object is an error. Both used to wipe the container.
+func TestSetNeverReplacesPopulatedContainers(t *testing.T) {
+	root, err := dt.Parse([]byte(`{"name":[{"family":"Doe"},{"family":"Smith"}],"id":{"a":1}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dt.Set(root, "name.family", "Roe"); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := dt.Serialize(root)
+	if want := `{"name":[{"family":"Roe"},{"family":"Smith"}],"id":{"a":1}}`; string(out) != want {
+		t.Errorf("after set name.family: %s, want %s", out, want)
+	}
+	if err := dt.Set(root, "id[0]", "x"); err == nil {
+		t.Fatal("index step on a populated object accepted")
+	}
+	out, _ = dt.Serialize(root)
+	if !strings.Contains(string(out), `"id":{"a":1}`) {
+		t.Errorf("object destroyed by rejected Set: %s", out)
+	}
+	// Scalars and empty containers still convert.
+	if err := dt.Set(root, "id.a.deep", "y"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dt.Set(root, "empty[1]", "z"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFlattenedKeysResolve: keys needing quotes are emitted with JSON
+// escapes by Flatten and must parse back with the same grammar.
+func TestFlattenedKeysResolve(t *testing.T) {
+	root, err := dt.Parse([]byte(`{"a.\nb":1,"tab\tkey":{"c]":true},"\u0001":"ctl","plain":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pv := range dt.Flatten(root) {
+		nodes, err := dt.Resolve(root, pv.Path)
+		if err != nil {
+			t.Errorf("Resolve(%s): %v", pv.Path, err)
+			continue
+		}
+		if len(nodes) != 1 || nodes[0].Value != pv.Value {
+			t.Errorf("Resolve(%s) = %v, want value %q", pv.Path, nodes, pv.Value)
+		}
+	}
+}
+
+// TestNumberKindIsValidated: a number leaf holding anything but a number
+// literal must not serialize raw.
+func TestNumberKindIsValidated(t *testing.T) {
+	for _, bad := range []string{`{"x":1}`, `"1"`, `01`, `1.`, `.5`, `+1`, `NaN`, ``} {
+		root := &message.Node{Name: "json", Kind: KindObject, Children: []*message.Node{{Name: "n", Kind: KindNumber, Value: bad}}}
+		if _, err := dt.Serialize(root); err == nil {
+			t.Errorf("number %q serialized", bad)
+		}
+	}
+	for _, ok := range []string{`0`, `-1`, `1.5`, `1e10`, `-2.5E-3`} {
+		root := &message.Node{Name: "json", Kind: KindObject, Children: []*message.Node{{Name: "n", Kind: KindNumber, Value: ok}}}
+		if _, err := dt.Serialize(root); err != nil {
+			t.Errorf("number %q rejected: %v", ok, err)
+		}
 	}
 }
 
@@ -270,8 +363,13 @@ func TestRegistered(t *testing.T) {
 	if !ok || got.Name() != "json" {
 		t.Fatal("json not registered")
 	}
-	if _, ok := got.(format.TypedSetter); !ok {
-		t.Fatal("json does not implement TypedSetter")
+	// Typed values survive Set: a Go bool stays a JSON boolean.
+	root, _ := got.Parse([]byte(`{}`))
+	if err := got.Set(root, "flag", true); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := got.Serialize(root); string(out) != `{"flag":true}` {
+		t.Fatalf("typed Set through the interface = %s", out)
 	}
 }
 

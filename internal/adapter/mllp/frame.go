@@ -60,10 +60,15 @@ func readFrame(r *bufio.Reader, maxSize int) ([]byte, error) {
 
 // writeFrame writes one MLLP frame.
 func writeFrame(w io.Writer, payload []byte) error {
+	_, err := w.Write(frame(payload))
+	return err
+}
+
+// frame wraps payload in the MLLP start/end bytes.
+func frame(payload []byte) []byte {
 	buf := make([]byte, 0, len(payload)+3)
 	buf = append(buf, startByte)
 	buf = append(buf, payload...)
 	buf = append(buf, endByte, crByte)
-	_, err := w.Write(buf)
-	return err
+	return buf
 }

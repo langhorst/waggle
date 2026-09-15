@@ -236,9 +236,19 @@ func TestListenerDuplicateFinalFrameNotRedelivered(t *testing.T) {
 	raw.expect(ack)
 	raw.send([]byte{eot})
 
-	time.Sleep(50 * time.Millisecond)
-	if got := c.messages(); len(got) != 1 {
-		t.Fatalf("duplicate final frame delivered %d messages", len(got))
+	// A second session is delivered in order after the first, so once it
+	// has arrived the count for the first is final: no sleeping needed.
+	raw.send([]byte{enq})
+	raw.expect(ack)
+	raw.send(encodeFrame(frame{Number: '1', Text: []byte("H|\\^&\rP|2\rL|1\r"), Last: true}))
+	raw.expect(ack)
+	raw.send([]byte{eot})
+	deadline := time.Now().Add(5 * time.Second)
+	for len(c.messages()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := c.messages(); len(got) != 2 {
+		t.Fatalf("duplicate final frame delivered: %d messages, want 2", len(got))
 	}
 }
 
@@ -302,8 +312,20 @@ func TestListenerHoldTimeoutInterrupts(t *testing.T) {
 	}
 }
 
+// closedAddr returns a loopback address nothing listens on.
+func closedAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return addr
+}
+
 func TestSenderReceiverDown(t *testing.T) {
-	s := newSender(t, "127.0.0.1:1", map[string]any{"connectTimeout": "200ms"})
+	s := newSender(t, closedAddr(t), map[string]any{"connectTimeout": "200ms"})
 	err := s.Send(context.Background(), []byte(sampleMsg), nil)
 	if err == nil || adapter.IsPermanent(err) {
 		t.Fatalf("expected transient connect error, got %v", err)
@@ -345,9 +367,8 @@ func TestSenderBusyReceiver(t *testing.T) {
 					continue
 				}
 				conn.Write([]byte{ack})
-				if f.Last {
-					// keep reading until EOT
-				}
+				// After the last frame keep reading until EOT.
+				_ = f.Last
 			case eot:
 				return
 			}
@@ -397,5 +418,30 @@ func TestMessageBytesArePreservedVerbatim(t *testing.T) {
 	}
 	if got := c.messages(); !bytes.Equal(got[0], msg) {
 		t.Fatalf("payload altered in transit:\n got %q\nwant %q", got[0], msg)
+	}
+}
+
+// TestListenerRestart: Stop then Start again accepts sessions on a new port.
+func TestListenerRestart(t *testing.T) {
+	c := &collector{}
+	l, err := NewListener(map[string]any{"addr": "127.0.0.1:0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for round := 1; round <= 2; round++ {
+		if err := l.Start(context.Background(), c.deliver); err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		s := newSender(t, l.Addr(), nil)
+		if err := s.Send(context.Background(), []byte(sampleMsg), nil); err != nil {
+			t.Fatalf("round %d: send: %v", round, err)
+		}
+		s.Close()
+		if err := l.Stop(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := len(c.messages()); got != 2 {
+		t.Errorf("received %d messages across two runs, want 2", got)
 	}
 }

@@ -3,7 +3,6 @@ package queue
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"path/filepath"
 	"sync"
@@ -214,6 +213,35 @@ func TestWorkerExhaustsRetriesThenDeadLetters(t *testing.T) {
 	})
 }
 
+// TestWorkerDeadLettersOrphanedDelivery: a queue row whose QUEUED record
+// never landed has no payload to send. The worker used to send empty
+// bytes; it must dead-letter instead.
+func TestWorkerDeadLettersOrphanedDelivery(t *testing.T) {
+	s := setup(t)
+	ctx := context.Background()
+	m := &message.Message{
+		ChannelID: "c1", CorrelationID: "x", Raw: []byte("raw"),
+		DataType: "hl7v2", State: message.StateReceived, ReceivedAt: time.Now(),
+	}
+	if err := s.Record(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	// Enqueue without SetDestinationState: the orphan shape.
+	if err := s.Enqueue(ctx, "c1", "d1", m.ID); err != nil {
+		t.Fatal(err)
+	}
+	a := &scriptedAdapter{}
+	runWorker(t, &Worker{Store: s, Adapter: a, ChannelID: "c1", DestID: "d1", PollInterval: 5 * time.Millisecond, Log: slog.New(slog.DiscardHandler)})
+
+	waitFor(t, "queue to drain", func() bool {
+		depth, _ := s.QueueDepth(ctx, "c1")
+		return depth["d1"] == 0
+	})
+	if got := a.deliveredList(); len(got) != 0 {
+		t.Fatalf("orphaned delivery was sent: %q", got)
+	}
+}
+
 func TestBackoffSchedule(t *testing.T) {
 	w := &Worker{BaseInterval: time.Second, CapInterval: 5 * time.Minute, MaxAttempts: -1, PollInterval: time.Second}
 	for attempt, want := range map[int]time.Duration{
@@ -229,8 +257,10 @@ func TestBackoffSchedule(t *testing.T) {
 			t.Errorf("attempt %d: delay %v outside [%v, %v]", attempt, got, time.Duration(min), time.Duration(max))
 		}
 	}
-	if fmt.Sprint(w.backoffDelay(50)) == "" { // must not overflow
-		t.Fatal("unreachable")
+	// Far past the cap the delay must stay at the cap (with jitter) rather
+	// than overflow into a negative or absurd duration.
+	if d := w.backoffDelay(50); d <= 0 || float64(d) > float64(w.CapInterval)*1.25 {
+		t.Fatalf("attempt 50: delay %v outside (0, cap*1.25]", d)
 	}
 }
 
@@ -290,5 +320,40 @@ func TestWorkerPassesStoredMeta(t *testing.T) {
 	}
 	if got["destination.id"] != "api" || got["channel.id"] != "c1" {
 		t.Errorf("worker identity keys missing: %v", got)
+	}
+}
+
+// TestWorkerWakesOnEnqueue: with a long poll interval, a delivery enqueued
+// after the worker went idle is still sent promptly because Enqueue wakes
+// the worker.
+func TestWorkerWakesOnEnqueue(t *testing.T) {
+	s := setup(t)
+	a := &scriptedAdapter{}
+	runWorker(t, &Worker{Store: s, Adapter: a, ChannelID: "c1", DestID: "d1", PollInterval: 30 * time.Second, Log: slog.New(slog.DiscardHandler)})
+	time.Sleep(50 * time.Millisecond) // let the worker find the empty queue and go idle
+	start := time.Now()
+	enqueue(t, s, "c1", "d1", "wake-me")
+	waitFor(t, "delivery", func() bool { return len(a.deliveredList()) == 1 })
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("delivery took %v; the worker was not woken", time.Since(start))
+	}
+}
+
+// TestWorkerRetriesForeverWithNegativeMaxAttempts: maxAttempts -1 never
+// dead-letters; a receiver that fails many times and then recovers still
+// gets the message.
+func TestWorkerRetriesForeverWithNegativeMaxAttempts(t *testing.T) {
+	s := setup(t)
+	a := &scriptedAdapter{failN: 15}
+	id := enqueue(t, s, "c1", "d1", "persistent")
+	runWorker(t, &Worker{Store: s, Adapter: a, ChannelID: "c1", DestID: "d1", MaxAttempts: -1,
+		BaseInterval: time.Millisecond, CapInterval: 2 * time.Millisecond, PollInterval: 5 * time.Millisecond, Log: slog.New(slog.DiscardHandler)})
+	waitFor(t, "delivery after 15 failures", func() bool { return len(a.deliveredList()) == 1 })
+	ds := destState(t, s, id)
+	if ds.State != message.StateSent || ds.DeadLetter {
+		t.Fatalf("destination = %+v, want SENT and not dead-lettered", ds)
+	}
+	if ds.Attempts < 15 {
+		t.Errorf("attempts = %d, want the failures counted", ds.Attempts)
 	}
 }

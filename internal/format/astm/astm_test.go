@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -82,7 +83,7 @@ func TestGoldenTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = append(got, '\n')
-	golden := filepath.Join("..", "..", "..", "testdata", "astm", "result.tree.json")
+	golden := filepath.Join("testdata", "result.tree.json")
 	if *update {
 		if err := os.WriteFile(golden, got, 0o644); err != nil {
 			t.Fatal(err)
@@ -176,6 +177,32 @@ func TestSet(t *testing.T) {
 	}
 }
 
+// TestSetSplitsComponents: ASTM has no subcomponents, so only the component
+// separator splits, and only below a field-level path.
+func TestSetSplitsComponents(t *testing.T) {
+	root, err := dt.Parse(sampleResult())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dt.Set(root, "P-6", "DOE^JOHN"); err != nil {
+		t.Fatal(err)
+	}
+	nodes, _ := dt.Resolve(root, "P-6.2")
+	if len(nodes) != 1 || nodes[0].Value != "JOHN" {
+		t.Errorf("P-6.2 = %v", nodes)
+	}
+	if err := dt.Set(root, "P-6.1", "A^B"); err != nil {
+		t.Fatal(err)
+	}
+	nodes, _ = dt.Resolve(root, "P-6.1")
+	if len(nodes) != 1 || nodes[0].Value != "A^B" {
+		t.Errorf("P-6.1 = %v, want the literal", nodes)
+	}
+	if err := dt.Set(root, "H-2.1", "x"); err == nil {
+		t.Error("Set below the header delimiter field accepted")
+	}
+}
+
 func TestSubcomponentPathRejected(t *testing.T) {
 	root := mustParse(t, sampleResult())
 	if _, err := dt.Resolve(root, "R-3.1.2"); err == nil {
@@ -207,8 +234,17 @@ func FuzzParse(f *testing.F) {
 		if err != nil {
 			t.Fatalf("Serialize after successful Parse: %v", err)
 		}
-		if _, err := dt.Parse(out); err != nil {
+		// The canonical form is a fixed point: same tree, same bytes.
+		root2, err := dt.Parse(out)
+		if err != nil {
 			t.Fatalf("re-Parse of serialized output failed: %v\ninput: %q\noutput: %q", err, raw, out)
+		}
+		if !reflect.DeepEqual(root, root2) {
+			t.Fatalf("Parse(Serialize(tree)) != tree\ninput: %q\noutput: %q", raw, out)
+		}
+		out2, err := dt.Serialize(root2)
+		if err != nil || !bytes.Equal(out, out2) {
+			t.Fatalf("canonical form not stable: %q -> %q (%v)", out, out2, err)
 		}
 	})
 }

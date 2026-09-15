@@ -1,7 +1,9 @@
-// Package tui is the Bubbletea observer: it embeds the engine in-process
-// (no HTTP hop) and renders live channel/message state read-only — a
-// development and testing companion, not a control surface. Control actions
-// (start/stop, replay, script editing) belong to the web UI.
+// Package tui is the Bubbletea observer: a read-only terminal view of a
+// running daemon's channels and messages. It talks to the daemon over the
+// HTTP API and SSE stream (HTTPBackend), so it can be attached to and
+// detached from a daemon at will; it never runs an engine of its own.
+// Control actions (start/stop, replay, script editing) belong to the web
+// UI.
 package tui
 
 import (
@@ -13,53 +15,19 @@ import (
 	"github.com/langhorst/waggle/internal/store"
 )
 
-// Backend is what the TUI needs from the engine — a seam so model tests run
-// against a fake. Because the TUI talks to the same surface the HTTP layer
-// wraps, a TUI-over-API variant can implement this later without touching
-// the views.
+// Backend is what the TUI needs from a daemon: the same view models the
+// HTTP API serves. HTTPBackend implements it over the API; tests use a
+// fake.
 type Backend interface {
-	Channels() []engine.Info
+	// ChannelSummaries lists channels with counts, the same view model the
+	// web dashboard and JSON API use.
+	ChannelSummaries(ctx context.Context) ([]engine.ChannelSummary, error)
+	ChannelSummary(ctx context.Context, channelID string) (engine.ChannelSummary, error)
 	ListMessages(ctx context.Context, channelID string, q store.ListQuery) ([]store.MessageSummary, error)
 	GetMessage(ctx context.Context, id int64) (*store.MessageDetail, error)
-	MessageCounts(ctx context.Context, channelID string) (map[message.State]int, error)
-	QueueDepth(ctx context.Context, channelID string) (map[string]int, error)
 	MessageTree(ctx context.Context, id int64, stage string) (*message.Node, string, error)
 	MessageDiff(ctx context.Context, id int64, destID string) ([]message.DiffEntry, error)
+	// Subscribe delivers the daemon's event stream; the returned func ends
+	// the subscription and closes the channel.
 	Subscribe(buf int) (<-chan events.Event, func())
-}
-
-// EngineBackend adapts an embedded *engine.Engine (with persistence) to the
-// Backend seam.
-type EngineBackend struct {
-	Eng *engine.Engine
-}
-
-func (b EngineBackend) Channels() []engine.Info { return b.Eng.Channels() }
-
-func (b EngineBackend) ListMessages(ctx context.Context, channelID string, q store.ListQuery) ([]store.MessageSummary, error) {
-	return b.Eng.Store().ListMessages(ctx, channelID, q)
-}
-
-func (b EngineBackend) GetMessage(ctx context.Context, id int64) (*store.MessageDetail, error) {
-	return b.Eng.Store().GetMessage(ctx, id)
-}
-
-func (b EngineBackend) MessageCounts(ctx context.Context, channelID string) (map[message.State]int, error) {
-	return b.Eng.Store().MessageCounts(ctx, channelID)
-}
-
-func (b EngineBackend) QueueDepth(ctx context.Context, channelID string) (map[string]int, error) {
-	return b.Eng.Store().QueueDepth(ctx, channelID)
-}
-
-func (b EngineBackend) MessageTree(ctx context.Context, id int64, stage string) (*message.Node, string, error) {
-	return b.Eng.MessageTree(ctx, id, stage)
-}
-
-func (b EngineBackend) MessageDiff(ctx context.Context, id int64, destID string) ([]message.DiffEntry, error) {
-	return b.Eng.MessageDiff(ctx, id, destID)
-}
-
-func (b EngineBackend) Subscribe(buf int) (<-chan events.Event, func()) {
-	return b.Eng.Bus().Subscribe(buf)
 }

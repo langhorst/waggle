@@ -26,13 +26,13 @@ package astm1381
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 )
 
 // E1381 control bytes.
 const (
-	soh = 0x01 // unused, listed for completeness
 	stx = 0x02
 	etx = 0x03
 	eot = 0x04
@@ -147,7 +147,7 @@ func readFrameAfter(first byte, r *bufio.Reader, maxText int) (frame, error) {
 }
 
 func unexpectedEOF(err error) error {
-	if err == io.EOF {
+	if errors.Is(err, io.EOF) {
 		return io.ErrUnexpectedEOF
 	}
 	return err

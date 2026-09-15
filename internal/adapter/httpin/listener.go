@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/langhorst/waggle/internal/adapter"
+	metakey "github.com/langhorst/waggle/internal/meta"
 )
 
 func init() {
@@ -31,20 +32,23 @@ func init() {
 
 // Ack modes, matching the MLLP listener's semantics.
 const (
-	AckImmediate   = "immediate"
-	AckDestination = "destination"
+	AckImmediate   = adapter.AckImmediate
+	AckDestination = adapter.AckDestination
 )
 
 // ListenerConfig configures the HTTP listener.
 type ListenerConfig struct {
-	Listen  string `yaml:"listen"`
-	Path    string `yaml:"path"`    // default "/"
-	AckMode string `yaml:"ackMode"` // default immediate
+	Listen  string          `yaml:"listen"`
+	Path    string          `yaml:"path"`    // default "/"
+	AckMode adapter.AckMode `yaml:"ackMode"` // default immediate
 	// HoldTimeout bounds how long a destination-mode response is held;
 	// on expiry the caller gets 504. Default 30s.
 	HoldTimeout adapter.Duration `yaml:"holdTimeout"`
 	// ReadTimeout bounds reading one request. Default 30s.
 	ReadTimeout adapter.Duration `yaml:"readTimeout"`
+	// IdleTimeout bounds how long a keep-alive connection may sit idle
+	// between requests. Default 60s.
+	IdleTimeout adapter.Duration `yaml:"idleTimeout"`
 	// MaxBodySize bounds one message's bytes. Default 10 MiB.
 	MaxBodySize int64 `yaml:"maxBodySize"`
 
@@ -85,9 +89,11 @@ func NewListener(settings map[string]any) (*Listener, error) {
 	if cfg.Listen == "" {
 		return nil, fmt.Errorf("http-listener: listen is required")
 	}
-	if cfg.AckMode != AckImmediate && cfg.AckMode != AckDestination {
-		return nil, fmt.Errorf("http-listener: ackMode must be %q or %q", AckImmediate, AckDestination)
+	mode, err := adapter.ParseAckMode(string(cfg.AckMode))
+	if err != nil {
+		return nil, fmt.Errorf("http-listener: %w", err)
 	}
+	cfg.AckMode = mode
 	if !strings.HasPrefix(cfg.Path, "/") {
 		cfg.Path = "/" + cfg.Path
 	}
@@ -96,6 +102,9 @@ func NewListener(settings map[string]any) (*Listener, error) {
 	}
 	if cfg.ReadTimeout <= 0 {
 		cfg.ReadTimeout = adapter.Duration(30 * time.Second)
+	}
+	if cfg.IdleTimeout <= 0 {
+		cfg.IdleTimeout = adapter.Duration(60 * time.Second)
 	}
 	if cfg.MaxBodySize <= 0 {
 		cfg.MaxBodySize = 10 << 20
@@ -118,7 +127,7 @@ func (l *Listener) Addr() string {
 }
 
 func (l *Listener) Start(ctx context.Context, deliver adapter.DeliverFunc) error {
-	ln, err := net.Listen("tcp", l.cfg.Listen)
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", l.cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("http-listener: %w", err)
 	}
@@ -126,7 +135,12 @@ func (l *Listener) Start(ctx context.Context, deliver adapter.DeliverFunc) error
 	srv := &http.Server{
 		Handler:     http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { l.handle(runCtx, w, r, deliver) }),
 		ReadTimeout: time.Duration(l.cfg.ReadTimeout),
-		BaseContext: func(net.Listener) context.Context { return runCtx },
+		// A destination-mode response is held for up to HoldTimeout after
+		// the request is read, so the write budget must cover that.
+		WriteTimeout:   time.Duration(l.cfg.HoldTimeout) + 10*time.Second,
+		IdleTimeout:    time.Duration(l.cfg.IdleTimeout),
+		MaxHeaderBytes: 1 << 20,
+		BaseContext:    func(net.Listener) context.Context { return runCtx },
 	}
 	done := make(chan struct{})
 
@@ -196,21 +210,26 @@ func (l *Listener) handle(ctx context.Context, w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Everything the listener knows about the request goes under source.*
+	// so it can never be mistaken for an http-sender routing hint.
 	meta := map[string]string{
-		"source.remote": r.RemoteAddr,
-		"http.method":   r.Method,
-		"http.path":     r.URL.Path,
+		metakey.SourceRemote:     r.RemoteAddr,
+		metakey.SourceHTTPMethod: r.Method,
+		metakey.SourceHTTPPath:   r.URL.Path,
 	}
 	if ct := r.Header.Get("Content-Type"); ct != "" {
-		meta["http.header.content-type"] = ct
+		meta[metakey.SourceHTTPContentType] = ct
 	}
 	for name, vals := range r.URL.Query() {
 		if len(vals) > 0 {
-			meta["http.query."+name] = vals[0]
+			meta[metakey.SourceHTTPQueryPrefix+name] = vals[0]
 		}
 	}
 
-	rec, err := deliver(ctx, body, meta)
+	// The handoff itself must not be cut short by Stop: once the request
+	// is read the message is either recorded whole or refused, never
+	// half-recorded because the listener's context went away mid-insert.
+	rec, err := deliver(context.WithoutCancel(ctx), body, meta)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": err.Error()})
 		return
@@ -219,18 +238,32 @@ func (l *Listener) handle(ctx context.Context, w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusAccepted, map[string]any{"messageId": rec.MessageID})
 		return
 	}
-	timer := time.NewTimer(time.Duration(l.cfg.HoldTimeout))
-	defer timer.Stop()
-	select {
-	case d := <-rec.Done:
+	// A client that disconnects releases its handler: fold its context
+	// into the hold.
+	holdCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(r.Context(), cancel)
+	defer stop()
+	d, outcome := adapter.AwaitDecision(holdCtx, rec, time.Duration(l.cfg.HoldTimeout))
+	switch outcome {
+	case adapter.Decided:
 		writeJSON(w, statusForAck(d.Code), map[string]any{
 			"code": d.Code, "text": d.Text, "messageId": rec.MessageID,
 		})
-	case <-timer.C:
+	case adapter.TimedOut:
 		writeJSON(w, http.StatusGatewayTimeout, map[string]any{
-			"code": "AE", "text": "processing timed out", "messageId": rec.MessageID,
+			"code": d.Code, "text": d.Text, "messageId": rec.MessageID,
 		})
-	case <-ctx.Done():
+	case adapter.Canceled:
+		if ctx.Err() == nil {
+			return // the client went away, not the listener; nobody to answer
+		}
+		// Stop released the hold. The message is recorded and will be
+		// processed; only the outcome is unknown, which is what 202 says.
+		// Returning without writing produced an implicit empty 200.
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"messageId": rec.MessageID, "text": "listener stopped before the outcome was known",
+		})
 	}
 }
 

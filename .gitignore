@@ -1,6 +1,9 @@
+# Build output
 /bin/
-/data/
+
+# Runtime state written by the daemon (default dataDir) and by `make run`
+data/
+out/
 *.db
 *.db-wal
 *.db-shm
-/out/

@@ -3,9 +3,12 @@
 // Translator chain, then a Recipient List of destinations, each with its own
 // optional filter/translator chain and outbound Channel Adapter.
 //
-// Message processing is strictly sequential per channel. Every state
-// transition goes through the Recorder (the persistence seam) and is
-// published on the event bus.
+// Message processing is strictly sequential per channel: one pipeline
+// goroutine drains a bounded intake buffer in arrival order. When the
+// buffer is full the source adapter blocks in deliver, which delays its
+// transport ACK, so backpressure reaches the sender instead of piling up
+// goroutines. Every state transition goes through the Recorder (the
+// persistence seam) and is published on the event bus.
 package channel
 
 import (
@@ -22,6 +25,7 @@ import (
 	"github.com/langhorst/waggle/internal/events"
 	"github.com/langhorst/waggle/internal/format"
 	"github.com/langhorst/waggle/internal/message"
+	metakey "github.com/langhorst/waggle/internal/meta"
 )
 
 // Status is a channel's lifecycle state.
@@ -56,8 +60,8 @@ type FilterFunc func(m *message.Message) (bool, error)
 type TranslateFunc func(m *message.Message) error
 
 // Recorder is the persistence seam: the pipeline reports every lifecycle
-// transition through it. Phase 2 runs with NewMemoryRecorder; the SQLite
-// store implements this in phase 3.
+// transition through it. The SQLite store is the production implementation;
+// NewMemoryRecorder serves tests and storeless runs.
 type Recorder interface {
 	// Record persists a freshly received message and assigns m.ID. Once it
 	// returns nil the engine owns the message (Guaranteed Delivery handoff).
@@ -111,14 +115,37 @@ type Channel struct {
 	Queue Queuer
 	Bus   *events.Bus
 	Log   *slog.Logger
+	// MaxPending bounds messages recorded but not yet processed. Zero
+	// means DefaultMaxPending.
+	MaxPending int
 
+	// lifecycleMu serializes Start/Pause/Resume/Stop. It is held across
+	// adapter calls; mu never is. Inbound adapters call deliver from their
+	// own goroutines and Stop implementations wait for those goroutines,
+	// so holding mu (which deliver needs) while calling Source.Stop would
+	// deadlock the moment a message arrived mid-transition.
+	lifecycleMu sync.Mutex
+	// mu guards the fields below.
 	mu        sync.Mutex
 	status    Status
+	stopping  bool // Stop in progress: refuse intake, keep draining
 	runCancel context.CancelFunc
-	// pipeMu serializes message processing: one message at a time per
-	// channel, in arrival order.
-	pipeMu sync.Mutex
-	wg     sync.WaitGroup
+	// pending feeds the pipeline goroutine; nil while stopped. inflight
+	// counts deliver/Inject calls between their status check and their
+	// handoff into pending, so Stop knows when it may close the buffer.
+	pending  chan *pendingMessage
+	pipeDone chan struct{}
+	inflight sync.WaitGroup
+}
+
+// DefaultMaxPending is the intake buffer size when MaxPending is unset.
+const DefaultMaxPending = 256
+
+// pendingMessage is one recorded message waiting for the pipeline.
+type pendingMessage struct {
+	ctx  context.Context
+	m    *message.Message
+	done chan<- adapter.AckDecision // nil when nobody waits (replay)
 }
 
 // Status returns the channel's lifecycle state.
@@ -133,10 +160,13 @@ func (c *Channel) Status() Status {
 
 // Start begins intake. Starting a paused channel resumes it.
 func (c *Channel) Start(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.status == StatusStarted {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	switch c.Status() {
+	case StatusStarted:
 		return nil
+	case StatusPaused:
+		return c.resumeLocked(ctx)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	for _, d := range c.Destinations {
@@ -145,68 +175,133 @@ func (c *Channel) Start(ctx context.Context) error {
 			return fmt.Errorf("channel %s: destination %s: %w", c.ID, d.ID, err)
 		}
 	}
+	size := c.MaxPending
+	if size <= 0 {
+		size = DefaultMaxPending
+	}
+	pending := make(chan *pendingMessage, size)
+	pipeDone := make(chan struct{})
+	c.mu.Lock()
+	c.pending, c.pipeDone = pending, pipeDone
+	c.mu.Unlock()
+	go c.run(pending, pipeDone)
+
 	if err := c.Source.Start(runCtx, c.deliver); err != nil {
 		cancel()
+		c.mu.Lock()
+		c.pending, c.pipeDone = nil, nil
+		c.mu.Unlock()
+		close(pending)
+		<-pipeDone
+		for _, d := range c.Destinations {
+			_ = d.Adapter.Close()
+		}
 		return fmt.Errorf("channel %s: source: %w", c.ID, err)
 	}
+	c.mu.Lock()
 	c.runCancel = cancel
 	c.setStatusLocked(StatusStarted)
+	c.mu.Unlock()
 	return nil
 }
 
-// Pause stops intake only.
+// run is the pipeline goroutine: it processes pending messages one at a
+// time, in arrival order, until the buffer is closed and drained.
+func (c *Channel) run(pending <-chan *pendingMessage, done chan<- struct{}) {
+	defer close(done)
+	for pm := range pending {
+		decision := c.process(pm.ctx, pm.m)
+		if pm.done != nil {
+			pm.done <- decision
+		}
+	}
+}
+
+// Pause stops intake only. Messages the source hands over while the stop
+// is in progress are still accepted and processed: a transport that has
+// already read a frame needs to answer it.
 func (c *Channel) Pause() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.status != StatusStarted {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.Status() != StatusStarted {
 		return fmt.Errorf("channel %s: not started", c.ID)
 	}
 	if err := c.Source.Stop(); err != nil {
 		return err
 	}
-	c.setStatusLocked(StatusPaused)
+	c.setStatus(StatusPaused)
 	return nil
 }
 
 // Resume restarts intake on a paused channel.
 func (c *Channel) Resume(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.status != StatusPaused {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.Status() != StatusPaused {
 		return fmt.Errorf("channel %s: not paused", c.ID)
 	}
+	return c.resumeLocked(ctx)
+}
+
+func (c *Channel) resumeLocked(ctx context.Context) error {
 	if err := c.Source.Start(ctx, c.deliver); err != nil {
 		return err
 	}
-	c.setStatusLocked(StatusStarted)
+	c.setStatus(StatusStarted)
 	return nil
 }
 
-// Stop halts intake, waits for in-flight messages, and closes destination
-// adapters.
+// Stop halts intake, drains messages already accepted, and closes
+// destination adapters.
 func (c *Channel) Stop() error {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+
 	c.mu.Lock()
 	status := c.status
-	cancel := c.runCancel
-	c.runCancel = nil
 	c.mu.Unlock()
+	if status != StatusStarted && status != StatusPaused {
+		c.setStatus(StatusStopped)
+		return nil
+	}
 
-	if status == StatusStarted || status == StatusPaused {
-		if status == StatusStarted {
-			_ = c.Source.Stop()
-		}
-		if cancel != nil {
-			cancel()
-		}
-		c.wg.Wait()
-		for _, d := range c.Destinations {
-			_ = d.Adapter.Close()
-		}
+	// 1. The source stops producing. Its goroutines may be blocked in
+	//    deliver on a full buffer; the pipeline goroutine is still
+	//    draining, so they return.
+	if status == StatusStarted {
+		_ = c.Source.Stop()
+	}
+	// 2. Refuse new intake, wait for handoffs already past the status
+	//    check, then close the buffer and let the pipeline drain it.
+	c.mu.Lock()
+	c.stopping = true
+	pending, pipeDone := c.pending, c.pipeDone
+	cancel := c.runCancel
+	c.pending, c.pipeDone, c.runCancel = nil, nil, nil
+	c.mu.Unlock()
+	c.inflight.Wait()
+	if pending != nil {
+		close(pending)
+		<-pipeDone
+	}
+	// 3. Nothing is processing any more: tear down adapters.
+	if cancel != nil {
+		cancel()
+	}
+	for _, d := range c.Destinations {
+		_ = d.Adapter.Close()
 	}
 	c.mu.Lock()
+	c.stopping = false
 	c.setStatusLocked(StatusStopped)
 	c.mu.Unlock()
 	return nil
+}
+
+func (c *Channel) setStatus(s Status) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.setStatusLocked(s)
 }
 
 func (c *Channel) setStatusLocked(s Status) {
@@ -222,12 +317,11 @@ func (c *Channel) setStatusLocked(s Status) {
 
 // deliver is the adapter.DeliverFunc handed to the source adapter.
 func (c *Channel) deliver(ctx context.Context, raw []byte, meta map[string]string) (adapter.Receipt, error) {
-	c.mu.Lock()
-	started := c.status == StatusStarted
-	c.mu.Unlock()
-	if !started {
-		return adapter.Receipt{}, fmt.Errorf("channel %s: not accepting messages", c.ID)
+	pending, err := c.admit(StatusStarted)
+	if err != nil {
+		return adapter.Receipt{}, err
 	}
+	defer c.inflight.Done()
 
 	m := &message.Message{
 		ChannelID:     c.ID,
@@ -244,34 +338,58 @@ func (c *Channel) deliver(ctx context.Context, raw []byte, meta map[string]strin
 	c.publishMessage(m.ID, message.StateReceived, "")
 
 	done := make(chan adapter.AckDecision, 1)
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		c.pipeMu.Lock()
-		defer c.pipeMu.Unlock()
-		done <- c.process(context.WithoutCancel(ctx), m)
-	}()
+	c.handoff(ctx, pending, m, done)
 	return adapter.Receipt{MessageID: m.ID, Done: done}, nil
 }
 
 // Inject records and processes a message that did not arrive through the
-// source adapter — message replay. The channel must not be stopped.
+// source adapter — message replay. The channel must not be stopped
+// (paused is fine: replay bypasses the source).
 func (c *Channel) Inject(ctx context.Context, m *message.Message) (int64, error) {
-	if c.Status() == StatusStopped {
-		return 0, fmt.Errorf("channel %s: stopped; start it to replay messages", c.ID)
+	pending, err := c.admit(StatusStarted, StatusPaused)
+	if err != nil {
+		return 0, fmt.Errorf("%w; start it to replay messages", err)
 	}
+	defer c.inflight.Done()
 	if err := c.Recorder.Record(ctx, m); err != nil {
 		return 0, fmt.Errorf("channel %s: recording replay: %w", c.ID, err)
 	}
 	c.publishMessage(m.ID, message.StateReceived, "")
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		c.pipeMu.Lock()
-		defer c.pipeMu.Unlock()
-		_ = c.process(context.WithoutCancel(ctx), m)
-	}()
+	c.handoff(ctx, pending, m, nil)
 	return m.ID, nil
+}
+
+// admit checks that the channel accepts intake in one of the given states
+// and registers the caller as in flight (the caller must inflight.Done()).
+// The returned buffer is the one to hand the message to; Stop closes it
+// only after every in-flight caller has finished.
+func (c *Channel) admit(states ...Status) (chan *pendingMessage, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ok := !c.stopping && c.pending != nil
+	if ok {
+		ok = false
+		for _, s := range states {
+			if c.status == s {
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok {
+		return nil, fmt.Errorf("channel %s: not accepting messages", c.ID)
+	}
+	c.inflight.Add(1)
+	return c.pending, nil
+}
+
+// handoff queues a recorded message for the pipeline. It blocks while the
+// buffer is full: the message is already recorded (the engine owns it),
+// so it must be processed, and blocking here is what turns a burst into
+// backpressure on the transport. The wait is bounded by the pipeline
+// draining, which Stop keeps running until the buffer is empty.
+func (c *Channel) handoff(ctx context.Context, pending chan *pendingMessage, m *message.Message, done chan<- adapter.AckDecision) {
+	pending <- &pendingMessage{ctx: context.WithoutCancel(ctx), m: m, done: done}
 }
 
 // process runs one message through the pipeline and returns the ACK
@@ -294,7 +412,10 @@ func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDe
 		}
 		if !keep {
 			m.State = message.StateFiltered
-			_ = c.Recorder.SetState(ctx, m.ID, message.StateFiltered, "")
+			if err := c.Recorder.SetState(ctx, m.ID, message.StateFiltered, ""); err != nil {
+				c.fail(ctx, m, fmt.Sprintf("recording filtered state: %v", err))
+				return storeFailure(err)
+			}
 			c.publishMessage(m.ID, message.StateFiltered, "")
 			return adapter.AckDecision{Code: "AA"}
 		}
@@ -307,20 +428,24 @@ func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDe
 		}
 	}
 	outType := c.transformedType(m)
-	if transformed, err := outType.Serialize(m.Tree); err == nil {
-		_ = c.Recorder.SetTransformed(ctx, m.ID, transformed, outType.Name())
+	transformed, err := outType.Serialize(m.Tree)
+	if err != nil {
+		c.fail(ctx, m, fmt.Sprintf("serialize (%s): %v", outType.Name(), err))
+		return adapter.AckDecision{Code: "AE", Text: err.Error()}
+	}
+	if err := c.Recorder.SetTransformed(ctx, m.ID, transformed, outType.Name()); err != nil {
+		c.fail(ctx, m, fmt.Sprintf("recording transformed payload: %v", err))
+		return storeFailure(err)
 	}
 	m.State = message.StateTransformed
-	_ = c.Recorder.SetState(ctx, m.ID, message.StateTransformed, "")
+	if err := c.Recorder.SetState(ctx, m.ID, message.StateTransformed, ""); err != nil {
+		c.fail(ctx, m, fmt.Sprintf("recording transformed state: %v", err))
+		return storeFailure(err)
+	}
 	c.publishMessage(m.ID, message.StateTransformed, "")
 
 	// Recipient List fan-out.
 	decision := adapter.AckDecision{Code: "AA"}
-	// A channel-level script may have set an explicit ACK without stopping
-	// processing (response.setAck).
-	if m.AckCode != "" {
-		decision = adapter.AckDecision{Code: m.AckCode, Text: m.AckText}
-	}
 	for _, d := range c.Destinations {
 		if err := c.sendTo(ctx, d, m); err != nil {
 			log.Warn("destination delivery failed", "destination", d.ID, "error", err)
@@ -337,7 +462,19 @@ func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDe
 			}
 		}
 	}
+	// An explicit response.setAck, from the channel chain or any
+	// destination chain, wins over the automatic decision.
+	if m.AckCode != "" {
+		decision = adapter.AckDecision{Code: m.AckCode, Text: m.AckText}
+	}
 	return decision
+}
+
+// storeFailure is the ACK for a message whose outcome could not be
+// recorded. The engine no longer owns it durably, so the sender gets AE
+// (retry later), never AR.
+func storeFailure(err error) adapter.AckDecision {
+	return adapter.AckDecision{Code: "AE", Text: "persistence failure: " + err.Error()}
 }
 
 // decisionForError maps a pipeline error to the source ACK: script
@@ -351,8 +488,8 @@ func decisionForError(err error) adapter.AckDecision {
 }
 
 // sendTo runs one destination's chain: filter, translators, serialize,
-// deliver. Phase 2 delivers synchronously; the Guaranteed Delivery queue
-// replaces the direct send for non-waitForAck destinations in phase 3.
+// deliver. Non-waitForAck destinations hand off to the Guaranteed Delivery
+// queue when one is configured; everything else is sent inline.
 func (c *Channel) sendTo(ctx context.Context, d *Destination, m *message.Message) error {
 	dm := &message.Message{
 		ID:            m.ID,
@@ -368,32 +505,36 @@ func (c *Channel) sendTo(ctx context.Context, d *Destination, m *message.Message
 	if d.Filter != nil {
 		keep, err := d.Filter(dm)
 		if err != nil {
-			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, nil, nil, fmt.Sprintf("filter: %v", err))
-			c.publishDestination(m.ID, d.ID, message.StateError)
-			return fmt.Errorf("filter: %w", err)
+			return c.failDestination(ctx, m, d, nil, fmt.Errorf("filter: %w", err))
 		}
 		if !keep {
-			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateFiltered, nil, nil, "")
-			c.publishDestination(m.ID, d.ID, message.StateFiltered)
+			c.recordDestination(ctx, m, d, message.StateFiltered, nil, nil, "")
 			return nil
 		}
 	}
 	for i, translate := range d.Translate {
 		if err := translate(dm); err != nil {
-			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, nil, nil, fmt.Sprintf("translator %d: %v", i+1, err))
-			c.publishDestination(m.ID, d.ID, message.StateError)
-			return fmt.Errorf("translator %d: %w", i+1, err)
+			return c.failDestination(ctx, m, d, nil, fmt.Errorf("translator %d: %w", i+1, err))
 		}
+	}
+	// response.setAck in a destination script applies to the source ACK
+	// like a channel-level one; it used to vanish with the per-destination
+	// copy.
+	if dm.AckCode != "" {
+		m.AckCode, m.AckText = dm.AckCode, dm.AckText
 	}
 
 	payload, err := d.OutType.Serialize(dm.Tree)
 	if err != nil {
-		_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, nil, nil, fmt.Sprintf("serialize (%s): %v", d.OutType.Name(), err))
-		c.publishDestination(m.ID, d.ID, message.StateError)
-		return fmt.Errorf("serialize: %w", err)
+		return c.failDestination(ctx, m, d, nil, fmt.Errorf("serialize (%s): %w", d.OutType.Name(), err))
 	}
 
-	_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateQueued, payload, dm.Meta, "")
+	// The QUEUED record carries the payload the worker will send, so it
+	// must be durable before the queue row exists: a queue entry with no
+	// payload behind it is a delivery of nothing.
+	if err := c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateQueued, payload, dm.Meta, ""); err != nil {
+		return c.failDestination(ctx, m, d, payload, fmt.Errorf("recording delivery: %w", err))
+	}
 	c.publishDestination(m.ID, d.ID, message.StateQueued)
 
 	// Guaranteed Delivery: hand non-waitForAck deliveries to the queue
@@ -401,25 +542,40 @@ func (c *Channel) sendTo(ctx context.Context, d *Destination, m *message.Message
 	// upstream sender owns retry (their outcome drives the source ACK).
 	if c.Queue != nil && !d.WaitForAck {
 		if err := c.Queue.Enqueue(ctx, c.ID, d.ID, m.ID); err != nil {
-			_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, payload, nil, err.Error())
-			c.publishDestination(m.ID, d.ID, message.StateError)
-			return fmt.Errorf("enqueue: %w", err)
+			return c.failDestination(ctx, m, d, payload, fmt.Errorf("enqueue: %w", err))
 		}
 		return nil
 	}
 
 	meta := copyMeta(dm.Meta)
-	meta["message.id"] = fmt.Sprintf("%d", m.ID)
-	meta["channel.id"] = c.ID
-	meta["destination.id"] = d.ID
+	meta[metakey.MessageID] = fmt.Sprintf("%d", m.ID)
+	meta[metakey.ChannelID] = c.ID
+	meta[metakey.DestinationID] = d.ID
 	if err := d.Adapter.Send(ctx, payload, meta); err != nil {
-		_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateError, payload, nil, err.Error())
-		c.publishDestination(m.ID, d.ID, message.StateError)
-		return err
+		return c.failDestination(ctx, m, d, payload, err)
 	}
-	_ = c.Recorder.SetDestinationState(ctx, m.ID, d.ID, message.StateSent, payload, nil, "")
-	c.publishDestination(m.ID, d.ID, message.StateSent)
+	c.recordDestination(ctx, m, d, message.StateSent, payload, nil, "")
 	return nil
+}
+
+// recordDestination writes one destination's state and publishes it. A
+// store failure here is logged rather than returned: the delivery outcome
+// is already decided (sent, filtered, or failed) and the caller has no
+// better recourse. The one state that must not be lost, QUEUED with its
+// payload, is written directly in sendTo and checked there.
+func (c *Channel) recordDestination(ctx context.Context, m *message.Message, d *Destination, state message.State, payload []byte, meta map[string]string, errText string) {
+	if err := c.Recorder.SetDestinationState(ctx, m.ID, d.ID, state, payload, meta, errText); err != nil {
+		c.Log.Error("recording destination state failed",
+			"channel", c.ID, "message", m.ID, "destination", d.ID, "state", state, "error", err)
+	}
+	c.publishDestination(m.ID, d.ID, state)
+}
+
+// failDestination records a destination-level failure and returns cause
+// unchanged, so callers can still classify it (Rejection, Permanent).
+func (c *Channel) failDestination(ctx context.Context, m *message.Message, d *Destination, payload []byte, cause error) error {
+	c.recordDestination(ctx, m, d, message.StateError, payload, nil, cause.Error())
+	return cause
 }
 
 // transformedType is the data type of the tree after the channel translator
@@ -436,7 +592,10 @@ func (c *Channel) transformedType(m *message.Message) format.DataType {
 func (c *Channel) fail(ctx context.Context, m *message.Message, errText string) {
 	m.State = message.StateError
 	m.Error = errText
-	_ = c.Recorder.SetState(ctx, m.ID, message.StateError, errText)
+	if err := c.Recorder.SetState(ctx, m.ID, message.StateError, errText); err != nil {
+		c.Log.Error("recording error state failed",
+			"channel", c.ID, "message", m.ID, "error", err)
+	}
 	c.publishMessage(m.ID, message.StateError, "")
 	c.Log.Error("message routed to invalid message channel",
 		"channel", c.ID, "message", m.ID, "error", errText)

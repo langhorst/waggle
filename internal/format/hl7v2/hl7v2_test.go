@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -96,7 +97,7 @@ func TestGoldenTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = append(got, '\n')
-	golden := filepath.Join("..", "..", "..", "testdata", "hl7v2", "adt_a01.tree.json")
+	golden := filepath.Join("testdata", "adt_a01.tree.json")
 	if *update {
 		if err := os.WriteFile(golden, got, 0o644); err != nil {
 			t.Fatal(err)
@@ -228,6 +229,89 @@ func TestSet(t *testing.T) {
 	}
 }
 
+// TestSetSplitsOnSeparatorsBelowTheAddressedLevel: set('PID-5', 'A^B')
+// builds components the way the parser would (Mirth semantics), so
+// set(get(x)) round-trips; separators at or above the addressed level stay
+// literal and are escaped on the wire.
+func TestSetSplitsOnSeparatorsBelowTheAddressedLevel(t *testing.T) {
+	root := mustParse(t, sampleADT())
+
+	if err := dt.Set(root, "PID-5", "SMITH^JANE&MARIE^^JR"); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(t, root, "PID-5.1"); got != "SMITH" {
+		t.Errorf("PID-5.1 = %q", got)
+	}
+	if got := get(t, root, "PID-5.2.2"); got != "MARIE" {
+		t.Errorf("PID-5.2.2 = %q", got)
+	}
+	if got := get(t, root, "PID-5.4"); got != "JR" {
+		t.Errorf("PID-5.4 = %q", got)
+	}
+
+	// set(get(x)) round-trips the structure.
+	before := get(t, root, "PID-5")
+	if err := dt.Set(root, "PID-5", before); err != nil {
+		t.Fatal(err)
+	}
+	if after := get(t, root, "PID-5"); after != before {
+		t.Errorf("set(get(PID-5)): %q -> %q", before, after)
+	}
+
+	// A component separator inside a component value is data.
+	if err := dt.Set(root, "PID-5.1", "A^B"); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(t, root, "PID-5.1"); got != "A^B" {
+		t.Errorf("PID-5.1 = %q, want the literal", got)
+	}
+	out, err := dt.Serialize(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `A\S\B^JANE&MARIE^^JR`) {
+		t.Errorf("wire = %q, want the escaped literal before the split components", out)
+	}
+	// Subcomponent separators inside a component split; inside a
+	// subcomponent they are data.
+	if err := dt.Set(root, "PID-5.1.1", "X&Y"); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(t, root, "PID-5.1.1"); got != "X&Y" {
+		t.Errorf("PID-5.1.1 = %q", got)
+	}
+	// Repetition separators never split on Set: a repetition is
+	// addressed with [n].
+	if err := dt.Set(root, "PID-3", "M1~M2"); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(t, root, "PID-3[1]"); got != "M1~M2" {
+		t.Errorf("PID-3[1] = %q, want the literal (no split on ~)", got)
+	}
+}
+
+// TestSetBelowHeaderDelimiterFieldsRejected: MSH-1/MSH-2 hold the
+// delimiters as raw values; writing MSH-2.2 used to corrupt the header.
+func TestSetBelowHeaderDelimiterFieldsRejected(t *testing.T) {
+	root := mustParse(t, sampleADT())
+	for _, p := range []string{"MSH-1.2", "MSH-2.2", "MSH-2.1.1"} {
+		if err := dt.Set(root, p, "x"); err == nil {
+			t.Errorf("Set(%s) accepted", p)
+		}
+	}
+	out, err := dt.Serialize(root)
+	if err != nil || !strings.HasPrefix(string(out), "MSH|^~\\&|") {
+		t.Fatalf("header damaged by rejected sets: %q (%v)", out, err)
+	}
+	// Field-level writes to the header delimiter fields still work.
+	if err := dt.Set(root, "MSH-2", "^~\\&#"); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(t, root, "MSH-2"); got != "^~\\&#" {
+		t.Errorf("MSH-2 = %q", got)
+	}
+}
+
 func TestEscapeRoundTrip(t *testing.T) {
 	raw := []byte("MSH|^~\\&|APP|FAC|APP2|FAC2|20260730||ORU^R01|1|P|2.5\r" +
 		"OBX|1|TX|N||a\\F\\b\\S\\c\\T\\d\\R\\e\\E\\f\\X0A\\g\r")
@@ -335,6 +419,25 @@ func TestFlattenPaths(t *testing.T) {
 	}
 }
 
+// TestInvalidDelimitersRejected: a header whose delimiters cannot
+// round-trip is a parse error rather than a message that silently changes
+// on re-serialization. Duplicates split escape sequences on re-parse, and
+// so do alphanumerics, since escape bodies are letters and hex digits.
+func TestInvalidDelimitersRejected(t *testing.T) {
+	for _, raw := range []string{
+		"MSHB000B\f00000", // fuzz-found: field B, comp/rep/esc all 0
+		"MSH00\x0f0",      // fuzz-found: field separator 0 inside \X0F\
+		"MSH|^^\\&|A\r",   // comp == rep
+		"MSH|^~^&|A\r",    // esc == comp
+		"MSH|^~\\\r|A\r",  // sub is the segment terminator
+		"MSH|^~\\E|A\r",   // sub is an escape letter
+	} {
+		if _, err := dt.Parse([]byte(raw)); err == nil {
+			t.Errorf("Parse(%q): expected a delimiter error", raw)
+		}
+	}
+}
+
 func TestParseErrors(t *testing.T) {
 	for name, raw := range map[string]string{
 		"empty":          "",
@@ -364,9 +467,18 @@ func FuzzParse(f *testing.F) {
 		if err != nil {
 			t.Fatalf("Serialize after successful Parse: %v", err)
 		}
-		// Serialized output must itself re-parse.
-		if _, err := dt.Parse(out); err != nil {
+		// Serialized output must itself re-parse, to the same tree, and
+		// serialize to the same bytes: the canonical form is a fixed point.
+		root2, err := dt.Parse(out)
+		if err != nil {
 			t.Fatalf("re-Parse of serialized output failed: %v\ninput: %q\noutput: %q", err, raw, out)
+		}
+		if !reflect.DeepEqual(root, root2) {
+			t.Fatalf("Parse(Serialize(tree)) != tree\ninput: %q\noutput: %q", raw, out)
+		}
+		out2, err := dt.Serialize(root2)
+		if err != nil || !bytes.Equal(out, out2) {
+			t.Fatalf("canonical form not stable: %q -> %q (%v)", out, out2, err)
 		}
 	})
 }

@@ -3,9 +3,12 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
+	_ "github.com/langhorst/waggle/internal/adapter/file"
+	_ "github.com/langhorst/waggle/internal/adapter/mllp"
 	_ "github.com/langhorst/waggle/internal/format/csvfmt"
 	_ "github.com/langhorst/waggle/internal/format/hl7v2"
 )
@@ -109,11 +112,18 @@ destinations:
 		"zero maxAttempts": strings.Replace(validChannel, "maxAttempts: 5", "maxAttempts: 0", 1),
 	}
 	dir := t.TempDir()
-	for name, content := range cases {
-		path := writeChannel(t, dir, "bad.yaml", content)
-		if _, err := LoadChannel(path); err == nil {
-			t.Errorf("%s: expected error", name)
-		}
+	names := make([]string, 0, len(cases))
+	for name := range cases {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			path := writeChannel(t, dir, "bad.yaml", cases[name])
+			if _, err := LoadChannel(path); err == nil {
+				t.Error("expected error")
+			}
+		})
 	}
 }
 
@@ -170,7 +180,110 @@ func TestLoadDaemonDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Listen != ":8420" || cfg.ChannelsDir != "channels" {
+	if cfg.Listen != DefaultListen || cfg.ChannelsDir != "channels" {
 		t.Errorf("defaults = %+v", cfg)
+	}
+}
+
+func TestLoadDaemonAuthPolicy(t *testing.T) {
+	cases := map[string]struct {
+		yaml    string
+		wantErr string
+	}{
+		"loopback without auth":      {yaml: "listen: 127.0.0.1:9000\n"},
+		"localhost without auth":     {yaml: "listen: localhost:9000\n"},
+		"ipv6 loopback without auth": {yaml: "listen: \"[::1]:9000\"\n"},
+		"all interfaces without auth": {
+			yaml:    "listen: \":9000\"\n",
+			wantErr: "no auth is configured",
+		},
+		"public address without auth": {
+			yaml:    "listen: 0.0.0.0:9000\n",
+			wantErr: "no auth is configured",
+		},
+		"public address with token": {yaml: "listen: 0.0.0.0:9000\nauth: {token: secret}\n"},
+		"public address auth disabled": {
+			yaml: "listen: 0.0.0.0:9000\nauth: {disabled: true}\n",
+		},
+		"disabled together with token": {
+			yaml:    "auth: {disabled: true, token: x}\n",
+			wantErr: "disabled is set together with credentials",
+		},
+		"basic user without password": {
+			yaml:    "auth: {basicUser: ops}\n",
+			wantErr: "basicUser requires basicPassword",
+		},
+		"basic password without user": {
+			yaml:    "auth: {basicPassword: pw}\n",
+			wantErr: "basicPassword requires basicUser",
+		},
+		"empty listen falls back to default": {yaml: "listen: \"\"\n"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "daemon.yaml")
+			if err := os.WriteFile(path, []byte(tc.yaml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadDaemon(path)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("expected error containing %q, got config %+v", tc.wantErr, cfg)
+			case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
+				t.Fatalf("error %q does not contain %q", err, tc.wantErr)
+			}
+			if err == nil && cfg.Listen == "" {
+				t.Errorf("listen not defaulted: %+v", cfg)
+			}
+		})
+	}
+}
+
+// TestValidateChecksAdapterTypes: adapter types are checked against the
+// registry at load time, like data types, instead of when the engine builds
+// the channel.
+func TestValidateChecksAdapterTypes(t *testing.T) {
+	base := func() *Channel {
+		return &Channel{
+			ID:     "c",
+			Source: Source{Type: "file-reader", DataType: "hl7v2", Settings: map[string]any{"dir": "in"}},
+			Destinations: []Destination{{
+				ID:      "out",
+				Adapter: AdapterRef{Type: "file-writer", Settings: map[string]any{"dir": "out"}},
+			}},
+		}
+	}
+	ok := base()
+	ok.Normalize()
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("valid channel rejected: %v", err)
+	}
+	if ok.Name != "c" || ok.Destinations[0].DataType != "hl7v2" {
+		t.Errorf("Normalize defaults: name %q, dest dataType %q", ok.Name, ok.Destinations[0].DataType)
+	}
+
+	badSource := base()
+	badSource.Source.Type = "carrier-pigeon"
+	badSource.Normalize()
+	if err := badSource.Validate(); err == nil || !strings.Contains(err.Error(), "unknown source type") {
+		t.Errorf("unknown source type: %v", err)
+	}
+	badDest := base()
+	badDest.Destinations[0].Adapter.Type = "fax"
+	badDest.Normalize()
+	if err := badDest.Validate(); err == nil || !strings.Contains(err.Error(), "unknown adapter type") {
+		t.Errorf("unknown adapter type: %v", err)
+	}
+
+	// Validate is pure: it reports a missing destination dataType rather
+	// than filling it in.
+	raw := base()
+	if err := raw.Validate(); err == nil || !strings.Contains(err.Error(), "dataType is required") {
+		t.Errorf("Validate without Normalize: %v", err)
+	}
+	if raw.Name != "" {
+		t.Error("Validate modified the config")
 	}
 }

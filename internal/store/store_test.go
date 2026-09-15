@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -79,7 +80,7 @@ func TestRecordAndGet(t *testing.T) {
 		t.Errorf("payload = %q, %v", payload, err)
 	}
 
-	if _, err := s.GetMessage(ctx, 99999); err != ErrNotFound {
+	if _, err := s.GetMessage(ctx, 99999); !errors.Is(err, ErrNotFound) {
 		t.Errorf("missing message: %v", err)
 	}
 }
@@ -301,4 +302,98 @@ func TestMessageCounts(t *testing.T) {
 	if err != nil || counts[message.StateReceived] != 1 || counts[message.StateError] != 1 {
 		t.Errorf("counts = %v, %v", counts, err)
 	}
+}
+
+// TestEnqueueWakesWorkerChannel: Enqueue and Requeue signal the queue's
+// wake channel so a worker need not poll.
+func TestEnqueueWakesWorkerChannel(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	wake := s.Wake("c1", "d1")
+	select {
+	case <-wake:
+		t.Fatal("wake signalled before any enqueue")
+	default:
+	}
+	m := &message.Message{ChannelID: "c1", CorrelationID: "x", Raw: []byte("raw"), DataType: "hl7v2", State: message.StateReceived, ReceivedAt: time.Now()}
+	if err := s.Record(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDestinationState(ctx, m.ID, "d1", message.StateQueued, []byte("p"), nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Enqueue(ctx, "c1", "d1", m.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-wake:
+	case <-time.After(time.Second):
+		t.Fatal("Enqueue did not signal the wake channel")
+	}
+	// A second pending delivery for the same message is refused by the
+	// unique index rather than silently duplicated.
+	if err := s.Enqueue(ctx, "c1", "d1", m.ID); err == nil {
+		t.Fatal("duplicate enqueue accepted")
+	}
+	// Another destination has its own wake channel.
+	select {
+	case <-s.Wake("c1", "d2"):
+		t.Fatal("wrong queue woken")
+	default:
+	}
+}
+
+// TestReadsRunAlongsideWrites: a read on the pool is not blocked by an
+// open write transaction on the writer connection (WAL mode).
+func TestReadsRunAlongsideWrites(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	m := &message.Message{ChannelID: "c1", CorrelationID: "x", Raw: []byte("raw"), DataType: "hl7v2", State: message.StateReceived, ReceivedAt: time.Now()}
+	if err := s.Record(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET state = 'TRANSFORMED' WHERE id = ?`, m.ID); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.ListMessages(ctx, "c1", ListQuery{})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("read blocked behind an open write transaction")
+	}
+}
+
+// TestInsertCountTriggersPrune: retention runs on its own goroutine when
+// enough inserts have accumulated, without anyone calling Prune.
+func TestInsertCountTriggersPrune(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	s.SetRetention("c1", 5)
+	for i := 0; i < pruneCheckEvery+1; i++ {
+		record(t, s, "c1", "m")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		list, err := s.ListMessages(ctx, "c1", ListQuery{Limit: 1000})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(list) <= 5 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("insert-count trigger never pruned the channel")
 }

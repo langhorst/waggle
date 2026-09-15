@@ -1,14 +1,13 @@
 package astm1381
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"net"
 	"sync"
 	"time"
 
 	"github.com/langhorst/waggle/internal/adapter"
+	"github.com/langhorst/waggle/internal/adapter/tcp"
 )
 
 // SenderConfig configures the E1381 sender.
@@ -18,8 +17,11 @@ type SenderConfig struct {
 	// AckTimeout bounds each wait for ENQ/frame acknowledgment (the E1381
 	// sender timeout is 15s). Default 15s.
 	AckTimeout adapter.Duration `yaml:"ackTimeout"`
-	// MaxRetries is the per-frame retransmission budget on NAK. Default 6
-	// (the E1381 limit).
+	// WriteTimeout bounds each write. Default 10s.
+	WriteTimeout adapter.Duration `yaml:"writeTimeout"`
+	// MaxRetries is how many times one frame is sent before the session is
+	// aborted (initial transmission plus retransmissions on NAK). Default 6:
+	// E1381 aborts a frame rejected six times.
 	MaxRetries int `yaml:"maxRetries"`
 	// FrameSize is the maximum frame text length. Default 240 (the E1381
 	// maximum).
@@ -35,14 +37,14 @@ type Sender struct {
 	cfg SenderConfig
 
 	mu   sync.Mutex
-	conn net.Conn
-	br   *bufio.Reader
+	conn tcp.Client
 }
 
 func NewSender(settings map[string]any) (*Sender, error) {
 	cfg := SenderConfig{
 		ConnectTimeout: adapter.Duration(10 * time.Second),
 		AckTimeout:     adapter.Duration(15 * time.Second),
+		WriteTimeout:   adapter.Duration(10 * time.Second),
 		MaxRetries:     6,
 		FrameSize:      defaultFrameSize,
 	}
@@ -58,13 +60,23 @@ func NewSender(settings map[string]any) (*Sender, error) {
 	if cfg.AckTimeout <= 0 {
 		cfg.AckTimeout = adapter.Duration(15 * time.Second)
 	}
+	if cfg.WriteTimeout <= 0 {
+		cfg.WriteTimeout = adapter.Duration(10 * time.Second)
+	}
 	if cfg.MaxRetries <= 0 {
 		cfg.MaxRetries = 6
 	}
 	if cfg.FrameSize <= 0 || cfg.FrameSize > defaultFrameSize {
 		cfg.FrameSize = defaultFrameSize
 	}
-	return &Sender{cfg: cfg}, nil
+	return &Sender{
+		cfg: cfg,
+		conn: tcp.Client{
+			Addr:           cfg.Addr,
+			ConnectTimeout: time.Duration(cfg.ConnectTimeout),
+			WriteTimeout:   time.Duration(cfg.WriteTimeout),
+		},
+	}, nil
 }
 
 // Open is lazy like the MLLP sender: the connection is established on first
@@ -74,67 +86,40 @@ func (s *Sender) Open(ctx context.Context) error { return nil }
 func (s *Sender) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.dropConnLocked()
-	return nil
-}
-
-func (s *Sender) dropConnLocked() {
-	if s.conn != nil {
-		s.conn.Close()
-		s.conn = nil
-		s.br = nil
-	}
-}
-
-func (s *Sender) ensureConnLocked(ctx context.Context) error {
-	if s.conn != nil {
-		return nil
-	}
-	d := net.Dialer{Timeout: time.Duration(s.cfg.ConnectTimeout)}
-	conn, err := d.DialContext(ctx, "tcp", s.cfg.Addr)
-	if err != nil {
-		return fmt.Errorf("astm-sender: connect %s: %w", s.cfg.Addr, err)
-	}
-	s.conn = conn
-	s.br = bufio.NewReader(conn)
-	return nil
+	return s.conn.Close()
 }
 
 // awaitLocked reads one control byte within the ACK timeout.
 func (s *Sender) awaitLocked(ctx context.Context) (byte, error) {
-	deadline := time.Now().Add(time.Duration(s.cfg.AckTimeout))
-	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
-		deadline = ctxDeadline
-	}
-	_ = s.conn.SetReadDeadline(deadline)
-	b, err := s.br.ReadByte()
-	_ = s.conn.SetReadDeadline(time.Time{})
-	return b, err
+	clear := s.conn.ReadDeadline(ctx, time.Duration(s.cfg.AckTimeout))
+	defer clear()
+	b, err := s.conn.Reader().ReadByte()
+	return b, tcp.CtxErr(ctx, err)
 }
 
 func (s *Sender) writeLocked(p []byte) error {
-	_ = s.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	_, err := s.conn.Write(p)
-	_ = s.conn.SetWriteDeadline(time.Time{})
-	return err
+	return s.conn.Write(p)
 }
 
 func (s *Sender) Send(ctx context.Context, payload []byte, meta map[string]string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if err := s.ensureConnLocked(ctx); err != nil {
-		return err // receiver down: retry later
+	if err := s.conn.Connect(ctx); err != nil {
+		return fmt.Errorf("astm-sender: connect %s: %w", s.cfg.Addr, err) // receiver down: retry later
 	}
+	// Cancellation (shutdown) must unblock a session parked on a stalled
+	// instrument.
+	release := s.conn.Session(ctx)
+	defer release()
 
 	// Establishment.
 	if err := s.writeLocked([]byte{enq}); err != nil {
-		s.dropConnLocked()
+		s.conn.Drop()
 		return fmt.Errorf("astm-sender: ENQ: %w", err)
 	}
 	switch b, err := s.awaitLocked(ctx); {
 	case err != nil:
-		s.dropConnLocked()
+		s.conn.Drop()
 		return fmt.Errorf("astm-sender: awaiting ENQ response: %w", err)
 	case b == ack:
 		// Proceed to transfer.
@@ -142,7 +127,7 @@ func (s *Sender) Send(ctx context.Context, payload []byte, meta map[string]strin
 		// Receiver busy: keep the connection, let the queue retry.
 		return fmt.Errorf("astm-sender: receiver busy (NAK to ENQ)")
 	default:
-		s.dropConnLocked()
+		s.conn.Drop()
 		return fmt.Errorf("astm-sender: unexpected ENQ response 0x%02X", b)
 	}
 
@@ -152,12 +137,12 @@ func (s *Sender) Send(ctx context.Context, payload []byte, meta map[string]strin
 		accepted := false
 		for attempt := 1; attempt <= s.cfg.MaxRetries; attempt++ {
 			if err := s.writeLocked(wire); err != nil {
-				s.dropConnLocked()
+				s.conn.Drop()
 				return fmt.Errorf("astm-sender: frame %c: %w", f.Number, err)
 			}
 			b, err := s.awaitLocked(ctx)
 			if err != nil {
-				s.dropConnLocked()
+				s.conn.Drop()
 				return fmt.Errorf("astm-sender: awaiting frame %c ACK: %w", f.Number, err)
 			}
 			switch b {
@@ -170,7 +155,7 @@ func (s *Sender) Send(ctx context.Context, payload []byte, meta map[string]strin
 				_ = s.writeLocked([]byte{eot})
 				return fmt.Errorf("astm-sender: receiver interrupted the transfer (EOT)")
 			default:
-				s.dropConnLocked()
+				s.conn.Drop()
 				return fmt.Errorf("astm-sender: unexpected frame response 0x%02X", b)
 			}
 			break
@@ -184,7 +169,7 @@ func (s *Sender) Send(ctx context.Context, payload []byte, meta map[string]strin
 
 	// Termination.
 	if err := s.writeLocked([]byte{eot}); err != nil {
-		s.dropConnLocked()
+		s.conn.Drop()
 		return fmt.Errorf("astm-sender: EOT: %w", err)
 	}
 	return nil

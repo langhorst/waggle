@@ -50,6 +50,13 @@ type Inbound interface {
 	Stop() error
 }
 
+// Addresser is implemented by inbound adapters that bind a network address:
+// Addr reports the bound address once Start has returned (useful when
+// configured with port 0), and "" before that.
+type Addresser interface {
+	Addr() string
+}
+
 // Outbound is an outbound Channel Adapter (message destination). Send
 // delivers one serialized payload; a returned error is transient (retry
 // with backoff) unless wrapped as Permanent.
@@ -123,6 +130,12 @@ func NewOutbound(typ string, settings map[string]any) (Outbound, error) {
 	}
 	return f(settings)
 }
+
+// HasInbound reports whether an inbound adapter type is registered.
+func HasInbound(typ string) bool { _, ok := inbound[typ]; return ok }
+
+// HasOutbound reports whether an outbound adapter type is registered.
+func HasOutbound(typ string) bool { _, ok := outbound[typ]; return ok }
 
 // InboundTypes returns all registered inbound type names, sorted.
 func InboundTypes() []string { return sortedKeys(inbound) }

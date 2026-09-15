@@ -2,6 +2,9 @@ package mllp
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -80,6 +83,43 @@ func startListener(t *testing.T, settings map[string]any, deliver adapter.Delive
 	return l, s
 }
 
+// TestSendHonoursContextCancel: a receiver that accepts the frame and never
+// answers must not hold Send (and the sender's mutex) past the context.
+func TestSendHonoursContextCancel(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = io.Copy(io.Discard, conn) // read forever, never ACK
+	}()
+	s, err := NewSender(map[string]any{"addr": ln.Addr().String(), "ackTimeout": "30s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = s.Send(ctx, []byte(sampleMsg), nil)
+	if err == nil {
+		t.Fatal("Send succeeded without an ACK")
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("Send ignored the context; took %v", time.Since(start))
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want context deadline", err)
+	}
+}
+
 func TestLoopbackImmediateAck(t *testing.T) {
 	var mu sync.Mutex
 	var received [][]byte
@@ -155,7 +195,13 @@ func TestLoopbackDestinationAckHoldTimeout(t *testing.T) {
 }
 
 func TestSenderReceiverDown(t *testing.T) {
-	s, err := NewSender(map[string]any{"addr": "127.0.0.1:1", "connectTimeout": "200ms"})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := ln.Addr().String()
+	ln.Close()
+	s, err := NewSender(map[string]any{"addr": closed, "connectTimeout": "200ms"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,4 +235,87 @@ func TestListenerConfigValidation(t *testing.T) {
 	if _, err := NewListener(map[string]any{"addr": ":0", "bogusKey": 1}); err == nil {
 		t.Error("unknown setting should fail")
 	}
+}
+
+// TestListenerRestart: Stop then Start again serves messages on a new port.
+func TestListenerRestart(t *testing.T) {
+	received := make(chan []byte, 4)
+	deliver := func(ctx context.Context, raw []byte, meta map[string]string) (adapter.Receipt, error) {
+		received <- append([]byte(nil), raw...)
+		done := make(chan adapter.AckDecision, 1)
+		done <- adapter.AckDecision{Code: "AA"}
+		return adapter.Receipt{MessageID: 1, Done: done}, nil
+	}
+	l, err := NewListener(map[string]any{"addr": "127.0.0.1:0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for round := 1; round <= 2; round++ {
+		if err := l.Start(context.Background(), deliver); err != nil {
+			t.Fatalf("round %d: start: %v", round, err)
+		}
+		s, err := NewSender(map[string]any{"addr": l.Addr(), "ackTimeout": "5s"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Send(context.Background(), []byte(sampleMsg), nil); err != nil {
+			t.Fatalf("round %d: send: %v", round, err)
+		}
+		<-received
+		s.Close()
+		if err := l.Stop(); err != nil {
+			t.Fatal(err)
+		}
+		if l.Addr() != "" {
+			t.Errorf("round %d: Addr after Stop = %q", round, l.Addr())
+		}
+	}
+}
+
+// TestListenerDropsFramingViolations: bytes outside the MLLP frame and a
+// frame beyond maxMessageSize close the connection without delivery.
+func TestListenerDropsFramingViolations(t *testing.T) {
+	delivered := make(chan struct{}, 4)
+	deliver := func(ctx context.Context, raw []byte, meta map[string]string) (adapter.Receipt, error) {
+		delivered <- struct{}{}
+		done := make(chan adapter.AckDecision, 1)
+		done <- adapter.AckDecision{Code: "AA"}
+		return adapter.Receipt{MessageID: 1, Done: done}, nil
+	}
+	l, _ := startListener(t, map[string]any{"maxMessageSize": 64}, deliver)
+
+	for name, wire := range map[string][]byte{
+		"garbage before start byte": []byte("hello" + sampleMsg),
+		"oversized frame":           frame([]byte(strings.Repeat("X", 200))),
+	} {
+		conn, err := net.Dial("tcp", l.Addr())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Write(wire); err != nil {
+			t.Fatal(err)
+		}
+		// The listener closes the connection: the read returns EOF/reset.
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		buf := make([]byte, 16)
+		if _, err := conn.Read(buf); err == nil {
+			t.Errorf("%s: listener answered instead of dropping the connection", name)
+		}
+		conn.Close()
+		select {
+		case <-delivered:
+			t.Errorf("%s: a message was delivered", name)
+		default:
+		}
+	}
+	// The listener is still serving well-formed traffic afterwards.
+	s, err := NewSender(map[string]any{"addr": l.Addr(), "ackTimeout": "5s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Send(context.Background(), []byte("MSH|^~\\&|A|B|C|D|1||ADT^A01|1|P|2.5\r"), nil); err != nil {
+		t.Fatalf("valid message after violations: %v", err)
+	}
+	<-delivered
 }

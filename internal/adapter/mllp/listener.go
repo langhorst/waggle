@@ -3,13 +3,16 @@ package mllp
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
-	"sync"
 	"time"
 
 	"github.com/langhorst/waggle/internal/adapter"
+	"github.com/langhorst/waggle/internal/adapter/tcp"
+	metakey "github.com/langhorst/waggle/internal/meta"
 )
 
 func init() {
@@ -21,27 +24,23 @@ func init() {
 	})
 }
 
-// AckMode selects when the listener acknowledges the sending system.
-const (
-	// AckImmediate acknowledges as soon as the engine records the message
-	// (Guaranteed Delivery handoff): fire-and-forget downstream.
-	AckImmediate = "immediate"
-	// AckDestination holds the ACK until the pipeline finishes — filter,
-	// transformers (which may reject via the response API), and delivery to
-	// every waitForAck destination.
-	AckDestination = "destination"
-)
-
 // ListenerConfig configures the MLLP listener.
 type ListenerConfig struct {
-	Addr    string `yaml:"addr"`
-	AckMode string `yaml:"ackMode"` // default immediate
+	Addr string `yaml:"addr"`
+	// AckMode is immediate (default) or destination; see adapter.AckMode.
+	AckMode adapter.AckMode `yaml:"ackMode"`
 	// HoldTimeout bounds how long a destination-mode ACK is held; on expiry
 	// FallbackAck is sent. Default 30s.
 	HoldTimeout adapter.Duration `yaml:"holdTimeout"`
 	FallbackAck string           `yaml:"fallbackAck"` // default AE
 	// MaxMessageSize bounds one message's bytes. Default 10 MiB.
 	MaxMessageSize int `yaml:"maxMessageSize"`
+	// WriteTimeout bounds writing one ACK. Default 10s.
+	WriteTimeout adapter.Duration `yaml:"writeTimeout"`
+	// IdleTimeout drops a connection that sends nothing for this long
+	// between messages. Zero (the default) keeps idle connections open,
+	// which is what HL7 senders expect.
+	IdleTimeout adapter.Duration `yaml:"idleTimeout"`
 }
 
 // Listener is the MLLP inbound Channel Adapter. Each connection is served by
@@ -50,19 +49,16 @@ type ListenerConfig struct {
 // violation closes the connection.
 type Listener struct {
 	cfg ListenerConfig
-
-	mu     sync.Mutex
-	ln     net.Listener
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	log *slog.Logger
+	srv tcp.Server
 }
 
 func NewListener(settings map[string]any) (*Listener, error) {
 	cfg := ListenerConfig{
-		AckMode:        AckImmediate,
 		HoldTimeout:    adapter.Duration(30 * time.Second),
 		FallbackAck:    "AE",
 		MaxMessageSize: 10 << 20,
+		WriteTimeout:   adapter.Duration(10 * time.Second),
 	}
 	if err := adapter.DecodeSettings(settings, &cfg); err != nil {
 		return nil, err
@@ -70,9 +66,11 @@ func NewListener(settings map[string]any) (*Listener, error) {
 	if cfg.Addr == "" {
 		return nil, fmt.Errorf("mllp-listener: addr is required")
 	}
-	if cfg.AckMode != AckImmediate && cfg.AckMode != AckDestination {
-		return nil, fmt.Errorf("mllp-listener: ackMode must be %q or %q", AckImmediate, AckDestination)
+	mode, err := adapter.ParseAckMode(string(cfg.AckMode))
+	if err != nil {
+		return nil, fmt.Errorf("mllp-listener: %w", err)
 	}
+	cfg.AckMode = mode
 	if cfg.HoldTimeout <= 0 {
 		cfg.HoldTimeout = adapter.Duration(30 * time.Second)
 	}
@@ -82,107 +80,76 @@ func NewListener(settings map[string]any) (*Listener, error) {
 	if cfg.MaxMessageSize <= 0 {
 		cfg.MaxMessageSize = 10 << 20
 	}
-	return &Listener{cfg: cfg}, nil
+	if cfg.WriteTimeout <= 0 {
+		cfg.WriteTimeout = adapter.Duration(10 * time.Second)
+	}
+	return &Listener{cfg: cfg, log: slog.Default()}, nil
 }
 
 // Addr returns the bound listen address (useful when configured with port
 // 0); empty until Start.
-func (l *Listener) Addr() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.ln == nil {
-		return ""
-	}
-	return l.ln.Addr().String()
-}
+func (l *Listener) Addr() string { return l.srv.Addr() }
 
 func (l *Listener) Start(ctx context.Context, deliver adapter.DeliverFunc) error {
-	ln, err := net.Listen("tcp", l.cfg.Addr)
+	err := l.srv.Start(ctx, l.cfg.Addr, func(ctx context.Context, conn net.Conn) {
+		l.serve(ctx, conn, deliver)
+	})
 	if err != nil {
 		return fmt.Errorf("mllp-listener: %w", err)
 	}
-	runCtx, cancel := context.WithCancel(ctx)
-
-	l.mu.Lock()
-	l.ln = ln
-	l.cancel = cancel
-	l.mu.Unlock()
-
-	l.wg.Add(1)
-	go func() {
-		defer l.wg.Done()
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return // listener closed
-			}
-			l.wg.Add(1)
-			go func() {
-				defer l.wg.Done()
-				defer conn.Close()
-				// Stop must not hang on connections a peer keeps open:
-				// closing them unblocks the frame read below.
-				unregister := context.AfterFunc(runCtx, func() { conn.Close() })
-				defer unregister()
-				l.serve(runCtx, conn, deliver)
-			}()
-		}
-	}()
-	// Close connections when the context ends so serve loops unblock.
-	go func() {
-		<-runCtx.Done()
-		ln.Close()
-	}()
 	return nil
 }
 
-func (l *Listener) Stop() error {
-	l.mu.Lock()
-	cancel, ln := l.cancel, l.ln
-	l.cancel, l.ln = nil, nil
-	l.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	if ln != nil {
-		ln.Close()
-	}
-	l.wg.Wait()
-	return nil
-}
+func (l *Listener) Stop() error { return l.srv.Stop() }
 
 func (l *Listener) serve(ctx context.Context, conn net.Conn, deliver adapter.DeliverFunc) {
 	br := bufio.NewReader(conn)
-	meta := map[string]string{"source.remote": conn.RemoteAddr().String()}
+	meta := map[string]string{metakey.SourceRemote: conn.RemoteAddr().String()}
 	for ctx.Err() == nil {
+		if l.cfg.IdleTimeout > 0 {
+			_ = conn.SetReadDeadline(time.Now().Add(time.Duration(l.cfg.IdleTimeout)))
+		}
 		raw, err := readFrame(br, l.cfg.MaxMessageSize)
 		if err != nil {
-			if err != io.EOF {
-				// Framing violation or truncated frame: drop the connection.
+			// EOF is the peer hanging up; anything else is a framing
+			// violation, truncated frame, or idle timeout. Either way,
+			// drop the connection.
+			if !errors.Is(err, io.EOF) && ctx.Err() == nil {
+				l.log.Warn("mllp-listener: dropping connection", "remote", conn.RemoteAddr(), "error", err)
 			}
 			return
 		}
+		_ = conn.SetReadDeadline(time.Time{})
 		l.handleMessage(ctx, conn, raw, meta, deliver)
 	}
 }
 
 func (l *Listener) handleMessage(ctx context.Context, conn net.Conn, raw []byte, meta map[string]string, deliver adapter.DeliverFunc) {
-	rec, err := deliver(ctx, raw, meta)
+	// The handoff must not be cut short by Stop; only the hold below is.
+	rec, err := deliver(context.WithoutCancel(ctx), raw, meta)
 	if err != nil {
-		_ = writeFrame(conn, BuildAck(raw, "AE", err.Error()))
+		l.respond(conn, BuildAck(raw, "AE", err.Error()))
 		return
 	}
-	if l.cfg.AckMode == AckImmediate {
-		_ = writeFrame(conn, BuildAck(raw, "AA", ""))
+	if l.cfg.AckMode == adapter.AckImmediate {
+		l.respond(conn, BuildAck(raw, "AA", ""))
 		return
 	}
-	timer := time.NewTimer(time.Duration(l.cfg.HoldTimeout))
-	defer timer.Stop()
-	select {
-	case d := <-rec.Done:
-		_ = writeFrame(conn, BuildAck(raw, d.Code, d.Text))
-	case <-timer.C:
-		_ = writeFrame(conn, BuildAck(raw, l.cfg.FallbackAck, "processing timed out"))
-	case <-ctx.Done():
+	d, outcome := adapter.AwaitDecision(ctx, rec, time.Duration(l.cfg.HoldTimeout))
+	switch outcome {
+	case adapter.Decided:
+		l.respond(conn, BuildAck(raw, d.Code, d.Text))
+	case adapter.TimedOut:
+		l.respond(conn, BuildAck(raw, l.cfg.FallbackAck, "processing timed out"))
+	case adapter.Canceled:
+		// Stopping: the message is recorded; the sender will see the
+		// connection close and, if it retries, a duplicate is at-least-once
+		// delivery doing its job.
 	}
+}
+
+func (l *Listener) respond(conn net.Conn, ackMsg []byte) {
+	_ = conn.SetWriteDeadline(time.Now().Add(time.Duration(l.cfg.WriteTimeout)))
+	_ = writeFrame(conn, ackMsg)
+	_ = conn.SetWriteDeadline(time.Time{})
 }

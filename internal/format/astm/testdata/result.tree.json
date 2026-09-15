@@ -9,120 +9,149 @@
           "children": [
             {
               "name": "1",
-              "value": "|"
+              "value": "|",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "2",
           "children": [
             {
               "name": "1",
-              "value": "\\^\u0026"
+              "value": "\\^\u0026",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "3",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "4",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "5",
           "children": [
             {
               "name": "1",
-              "value": "LIS"
+              "value": "LIS",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "6",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "7",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "8",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "9",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "10",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "11",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "12",
           "children": [
             {
               "name": "1",
-              "value": "P"
+              "value": "P",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "13",
           "children": [
             {
               "name": "1",
-              "value": "LIS2-A2"
+              "value": "LIS2-A2",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "14",
           "children": [
             {
               "name": "1",
-              "value": "20260730120000"
+              "value": "20260730120000",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         }
-      ]
+      ],
+      "kind": "segment"
     },
     {
       "name": "P",
@@ -132,34 +161,42 @@
           "children": [
             {
               "name": "1",
-              "value": "1"
+              "value": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "2",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "3",
           "children": [
             {
               "name": "1",
-              "value": "PATID123"
+              "value": "PATID123",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "4",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "5",
@@ -169,43 +206,54 @@
               "children": [
                 {
                   "name": "1",
-                  "value": "DOE"
+                  "value": "DOE",
+                  "kind": "component"
                 },
                 {
                   "name": "2",
-                  "value": "JOHN"
+                  "value": "JOHN",
+                  "kind": "component"
                 }
-              ]
+              ],
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "6",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "7",
           "children": [
             {
               "name": "1",
-              "value": "19800101"
+              "value": "19800101",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "8",
           "children": [
             {
               "name": "1",
-              "value": "M"
+              "value": "M",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         }
-      ]
+      ],
+      "kind": "segment"
     },
     {
       "name": "O",
@@ -215,26 +263,32 @@
           "children": [
             {
               "name": "1",
-              "value": "1"
+              "value": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "2",
           "children": [
             {
               "name": "1",
-              "value": "SPEC001"
+              "value": "SPEC001",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "3",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "4",
@@ -243,41 +297,52 @@
               "name": "1",
               "children": [
                 {
-                  "name": "1"
+                  "name": "1",
+                  "kind": "component"
                 },
                 {
-                  "name": "2"
+                  "name": "2",
+                  "kind": "component"
                 },
                 {
-                  "name": "3"
+                  "name": "3",
+                  "kind": "component"
                 },
                 {
                   "name": "4",
-                  "value": "GLU"
+                  "value": "GLU",
+                  "kind": "component"
                 }
-              ]
+              ],
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "5",
           "children": [
             {
               "name": "1",
-              "value": "R"
+              "value": "R",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "6",
           "children": [
             {
               "name": "1",
-              "value": "20260730113000"
+              "value": "20260730113000",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         }
-      ]
+      ],
+      "kind": "segment"
     },
     {
       "name": "R",
@@ -287,9 +352,11 @@
           "children": [
             {
               "name": "1",
-              "value": "1"
+              "value": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "2",
@@ -298,108 +365,135 @@
               "name": "1",
               "children": [
                 {
-                  "name": "1"
+                  "name": "1",
+                  "kind": "component"
                 },
                 {
-                  "name": "2"
+                  "name": "2",
+                  "kind": "component"
                 },
                 {
-                  "name": "3"
+                  "name": "3",
+                  "kind": "component"
                 },
                 {
                   "name": "4",
-                  "value": "GLU"
+                  "value": "GLU",
+                  "kind": "component"
                 }
-              ]
+              ],
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "3",
           "children": [
             {
               "name": "1",
-              "value": "10|5"
+              "value": "10|5",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "4",
           "children": [
             {
               "name": "1",
-              "value": "mg/dL"
+              "value": "mg/dL",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "5",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "6",
           "children": [
             {
               "name": "1",
-              "value": "N"
+              "value": "N",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "7",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "8",
           "children": [
             {
               "name": "1",
-              "value": "F"
+              "value": "F",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "9",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "10",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "11",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "12",
           "children": [
             {
               "name": "1",
-              "value": "20260730114500"
+              "value": "20260730114500",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         }
-      ]
+      ],
+      "kind": "segment"
     },
     {
       "name": "R",
@@ -409,9 +503,11 @@
           "children": [
             {
               "name": "1",
-              "value": "2"
+              "value": "2",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "2",
@@ -420,108 +516,135 @@
               "name": "1",
               "children": [
                 {
-                  "name": "1"
+                  "name": "1",
+                  "kind": "component"
                 },
                 {
-                  "name": "2"
+                  "name": "2",
+                  "kind": "component"
                 },
                 {
-                  "name": "3"
+                  "name": "3",
+                  "kind": "component"
                 },
                 {
                   "name": "4",
-                  "value": "HBA1C"
+                  "value": "HBA1C",
+                  "kind": "component"
                 }
-              ]
+              ],
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "3",
           "children": [
             {
               "name": "1",
-              "value": "5.4"
+              "value": "5.4",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "4",
           "children": [
             {
               "name": "1",
-              "value": "%"
+              "value": "%",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "5",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "6",
           "children": [
             {
               "name": "1",
-              "value": "N"
+              "value": "N",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "7",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "8",
           "children": [
             {
               "name": "1",
-              "value": "F"
+              "value": "F",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "9",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "10",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "11",
           "children": [
             {
-              "name": "1"
+              "name": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "12",
           "children": [
             {
               "name": "1",
-              "value": "20260730114500"
+              "value": "20260730114500",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         }
-      ]
+      ],
+      "kind": "segment"
     },
     {
       "name": "L",
@@ -531,20 +654,25 @@
           "children": [
             {
               "name": "1",
-              "value": "1"
+              "value": "1",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         },
         {
           "name": "2",
           "children": [
             {
               "name": "1",
-              "value": "N"
+              "value": "N",
+              "kind": "repetition"
             }
-          ]
+          ],
+          "kind": "field"
         }
-      ]
+      ],
+      "kind": "segment"
     }
   ]
 }

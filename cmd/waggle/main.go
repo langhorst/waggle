@@ -1,7 +1,6 @@
-// Command waggle is the self-contained integration engine
-// daemon. It hosts multiple channels defined by YAML files, exposes the
-// HTTP API and web UI (phase 6/7), and can alternatively run with the
-// embedded TUI observer attached (phase 5).
+// Command waggle is the self-contained integration engine daemon. It hosts
+// multiple channels defined by YAML files and exposes the HTTP API and web
+// UI; `waggle tui` attaches the terminal observer instead.
 //
 // Usage:
 //
@@ -13,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -60,11 +60,14 @@ func main() {
 	}
 }
 
-// runTUI starts the engine in-process from the same config and attaches the
-// read-only observer TUI. Logs go to a file so they don't tear the screen.
+// runTUI attaches the read-only observer TUI to a running daemon over its
+// HTTP API and event stream. The address and token default to the daemon
+// config so `waggle tui` next to `waggle daemon` just works.
 func runTUI(args []string) int {
 	fs := flag.NewFlagSet("tui", flag.ExitOnError)
-	configPath := fs.String("config", "daemon.yaml", "path to daemon config")
+	configPath := fs.String("config", "daemon.yaml", "path to daemon config (for the listen address and token)")
+	addr := fs.String("addr", "", "daemon API address, e.g. 127.0.0.1:8420 (default: the config's listen address)")
+	token := fs.String("token", "", "API token (default: auth.token from the config, or $WAGGLE_TOKEN)")
 	_ = fs.Parse(args)
 
 	cfg, err := config.LoadDaemon(*configPath)
@@ -72,51 +75,40 @@ func runTUI(args []string) int {
 		fmt.Fprintf(os.Stderr, "loading daemon config: %v\n", err)
 		return 1
 	}
-	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "creating data dir: %v\n", err)
+	if *addr == "" {
+		*addr = dialableAddr(cfg.Listen)
+	}
+	if *token == "" {
+		*token = cfg.Auth.Token
+	}
+	if *token == "" {
+		*token = os.Getenv("WAGGLE_TOKEN")
+	}
+	backend := &tui.HTTPBackend{BaseURL: "http://" + *addr, Token: *token}
+	// Fail fast with a readable message rather than an empty screen.
+	if _, err := backend.ChannelSummaries(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "connecting to the daemon at %s: %v\n", *addr, err)
 		return 1
 	}
-	logFile, err := os.OpenFile(filepath.Join(cfg.DataDir, "tui.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "opening log file: %v\n", err)
-		return 1
-	}
-	defer logFile.Close()
-	log := slog.New(slog.NewTextHandler(logFile, nil))
-	slog.SetDefault(log)
-
-	channels, err := config.LoadChannels(cfg.ChannelsDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "loading channels: %v\n", err)
-		return 1
-	}
-	st, err := store.Open(filepath.Join(cfg.DataDir, "messages.db"))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "opening message store: %v\n", err)
-		return 1
-	}
-	defer st.Close()
-	scripts := script.New(script.Options{HotReload: cfg.HotReload, Log: log})
-	defer scripts.Close()
-
-	eng := engine.New(engine.Options{Log: log, Store: st, Scripts: scripts})
-	for _, ch := range channels {
-		if err := eng.LoadChannel(ch); err != nil {
-			fmt.Fprintf(os.Stderr, "loading channel %s: %v\n", ch.ID, err)
-			return 1
-		}
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	eng.StartEnabled(ctx)
-	defer eng.Shutdown()
-
-	p := tea.NewProgram(tui.New(tui.EngineBackend{Eng: eng}), tea.WithAltScreen())
+	p := tea.NewProgram(tui.New(backend), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "tui: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// dialableAddr turns a listen address into one a client can connect to: a
+// bare port or wildcard host means loopback.
+func dialableAddr(listen string) string {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return listen
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
 }
 
 func runDaemon(args []string) int {
@@ -166,15 +158,33 @@ func runDaemon(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	eng.StartEnabled(ctx)
+	if errs := eng.StartEnabled(ctx); len(errs) > 0 {
+		// Each failure was logged with its channel; the daemon keeps
+		// running so the rest of the channels serve and the operator can
+		// fix and reload the broken ones from the UI.
+		log.Warn("some channels failed to start", "failed", len(errs), "total", len(channels))
+	}
 
 	apiServer := &api.Server{
 		Eng:         eng,
 		Scripts:     scripts,
 		ScriptsRoot: cfg.ChannelsDir,
+		Auth:        cfg.Auth,
 		Log:         log,
 	}
-	httpServer := &http.Server{Addr: cfg.Listen, Handler: apiServer.Handler()}
+	if cfg.Auth.Disabled {
+		log.Warn("http api authentication is disabled", "addr", cfg.Listen)
+	}
+	// No WriteTimeout: the SSE endpoints stream indefinitely, and the API
+	// applies a per-response deadline to everything else.
+	httpServer := &http.Server{
+		Addr:              cfg.Listen,
+		Handler:           apiServer.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
+	}
 	go func() {
 		log.Info("http api listening", "addr", cfg.Listen)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {

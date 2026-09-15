@@ -125,7 +125,7 @@ func (DataType) Resolve(root *message.Node, pathExpr string) ([]*message.Node, e
 	return out, nil
 }
 
-func (DataType) Set(root *message.Node, pathExpr, value string) error {
+func (DataType) Set(root *message.Node, pathExpr string, value any) error {
 	p, err := parsePath(pathExpr)
 	if err != nil {
 		return err
@@ -140,13 +140,47 @@ func (DataType) Set(root *message.Node, pathExpr, value string) error {
 	for len(root.Children) < row {
 		root.Children = append(root.Children, &message.Node{Name: "R"})
 	}
-	rowNode := root.Children[row-1]
-	for len(rowNode.Children) < p.col {
+	setColumn(root.Children[row-1], p.col, format.String(value))
+	return nil
+}
+
+func setColumn(rowNode *message.Node, col int, value string) {
+	for len(rowNode.Children) < col {
 		rowNode.Children = append(rowNode.Children,
 			&message.Node{Name: strconv.Itoa(len(rowNode.Children) + 1)})
 	}
-	rowNode.Children[p.col-1].Value = value
-	rowNode.Children[p.col-1].Children = nil
+	rowNode.Children[col-1].Value = value
+	rowNode.Children[col-1].Children = nil
+}
+
+// relColumn parses a row-relative path: a bare 1-based column number.
+func relColumn(rel string) (int, error) {
+	col, err := strconv.Atoi(rel)
+	if err != nil || col < 1 {
+		return 0, fmt.Errorf("csv: row-relative path %q must be a column number", rel)
+	}
+	return col, nil
+}
+
+// ResolveFrom implements format.DataType: rel is a column number on the row.
+func (DataType) ResolveFrom(root, row *message.Node, rel string) ([]*message.Node, error) {
+	col, err := relColumn(rel)
+	if err != nil {
+		return nil, err
+	}
+	if col > len(row.Children) {
+		return nil, nil
+	}
+	return []*message.Node{row.Children[col-1]}, nil
+}
+
+// SetFrom implements format.DataType.
+func (DataType) SetFrom(root, row *message.Node, rel string, value any) error {
+	col, err := relColumn(rel)
+	if err != nil {
+		return err
+	}
+	setColumn(row, col, format.String(value))
 	return nil
 }
 

@@ -8,7 +8,8 @@
 // Transformer scripts route per message through meta: meta['http.method']
 // overrides the configured method and meta['http.path'] is resolved against
 // the configured URL (absolute paths replace, relative paths append, query
-// strings carry over).
+// strings carry over). The path may not carry a scheme or host: the
+// destination host is the operator's decision in YAML, never a script's.
 package httpout
 
 import (
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/langhorst/waggle/internal/adapter"
+	metakey "github.com/langhorst/waggle/internal/meta"
 )
 
 func init() {
@@ -35,9 +37,13 @@ func init() {
 
 // Meta keys scripts set to route a single message.
 const (
-	MetaMethod = "http.method"
-	MetaPath   = "http.path"
+	MetaMethod = metakey.HTTPMethod
+	MetaPath   = metakey.HTTPPath
 )
+
+// maxDrainBytes bounds how much of a successful response body is read
+// before the connection is released.
+const maxDrainBytes = 1 << 20
 
 // SenderConfig configures the HTTP sender.
 type SenderConfig struct {
@@ -93,7 +99,7 @@ func NewSender(settings map[string]any) (*Sender, error) {
 		if !pool.AppendCertsFromPEM(pemBytes) {
 			return nil, fmt.Errorf("http-sender: caFile %s contains no certificates", cfg.CAFile)
 		}
-		transport.TLSClientConfig = &tls.Config{RootCAs: pool}
+		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
 	return &Sender{
 		cfg:  cfg,
@@ -117,7 +123,10 @@ func (s *Sender) Send(ctx context.Context, payload []byte, meta map[string]strin
 		ref, err := url.Parse(p)
 		if err != nil {
 			// A script wrote an unparseable path; retrying cannot fix it.
-			return adapter.Permanent(fmt.Errorf("http-sender: invalid %s %q: %v", MetaPath, p, err))
+			return adapter.Permanent(fmt.Errorf("http-sender: invalid %s %q: %w", MetaPath, p, err))
+		}
+		if ref.Scheme != "" || ref.Host != "" || ref.User != nil || strings.HasPrefix(p, "//") {
+			return adapter.Permanent(fmt.Errorf("http-sender: %s %q must be a path, not a URL", MetaPath, p))
 		}
 		target = s.base.ResolveReference(ref)
 	}
@@ -128,7 +137,7 @@ func (s *Sender) Send(ctx context.Context, payload []byte, meta map[string]strin
 
 	req, err := http.NewRequestWithContext(ctx, method, target.String(), bytes.NewReader(payload))
 	if err != nil {
-		return adapter.Permanent(fmt.Errorf("http-sender: %v", err))
+		return adapter.Permanent(fmt.Errorf("http-sender: %w", err))
 	}
 	req.Header.Set("Content-Type", s.cfg.ContentType)
 	for k, v := range s.cfg.Headers {
@@ -144,7 +153,9 @@ func (s *Sender) Send(ctx context.Context, payload []byte, meta map[string]strin
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		_, _ = io.Copy(io.Discard, resp.Body) // drain for connection reuse
+		// Drain (bounded) so the connection can be reused; a response
+		// larger than this is not worth reading for that.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
 		return nil
 	}
 

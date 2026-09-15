@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,9 +18,11 @@ import (
 
 	"github.com/langhorst/waggle/internal/config"
 	"github.com/langhorst/waggle/internal/engine"
+	"github.com/langhorst/waggle/internal/events"
 	"github.com/langhorst/waggle/internal/message"
 	"github.com/langhorst/waggle/internal/script"
 	"github.com/langhorst/waggle/internal/store"
+	"github.com/langhorst/waggle/internal/testutil"
 
 	_ "github.com/langhorst/waggle/internal/adapter/file"
 	_ "github.com/langhorst/waggle/internal/format/csvfmt"
@@ -31,6 +34,7 @@ const sampleHL7 = "MSH|^~\\&|SEND|SFAC|RECV|RFAC|20260730||ADT^A01|CTRL001|P|2.5
 type harness struct {
 	t       *testing.T
 	ts      *httptest.Server
+	srv     *Server
 	eng     *engine.Engine
 	st      *store.Store
 	work    string
@@ -42,25 +46,18 @@ type harness struct {
 // (HL7 in from files, transformed, CSV out to files), and the HTTP server.
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	work := t.TempDir()
+	f := testutil.NewFixture(t)
+	work := f.Work
 	inDir := filepath.Join(work, "in")
 	outDir := filepath.Join(work, "out")
 	channelsDir := filepath.Join(work, "channels")
 	scriptsDir := filepath.Join(channelsDir, "scripts")
-	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.MkdirAll(inDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeFile := func(path, content string) {
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	writeFile(filepath.Join(scriptsDir, "upper.js"),
+	testutil.WriteFile(t, filepath.Join(scriptsDir, "upper.js"),
 		`function transform(msg) { msg.set('PID-5.1', msg.get('PID-5.1').toUpperCase()); }`)
-	writeFile(filepath.Join(channelsDir, "feed.yaml"), `
+	testutil.WriteFile(t, filepath.Join(channelsDir, "feed.yaml"), `
 id: feed
 source:
   type: file-reader
@@ -74,34 +71,31 @@ destinations:
       settings: {dir: `+outDir+`, pattern: "{id}.hl7"}
     queue: {retryInterval: 10ms}
 `)
-
-	st, err := store.Open(filepath.Join(work, "messages.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
-	scripts := script.New(script.Options{Log: slog.New(slog.DiscardHandler)})
-	t.Cleanup(scripts.Close)
-
-	eng := engine.New(engine.Options{Store: st, Scripts: scripts, Log: slog.New(slog.DiscardHandler)})
+	// The channel is loaded the way the daemon loads it (the whole
+	// directory) so ScriptsRoot confinement sees realistic paths.
 	channels, err := config.LoadChannels(channelsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, ch := range channels {
-		if err := eng.LoadChannel(ch); err != nil {
+		if err := f.Eng.LoadChannel(ch); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := eng.Start(context.Background(), "feed"); err != nil {
+	if err := f.Eng.Start(context.Background(), "feed"); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(eng.Shutdown)
 
-	srv := &Server{Eng: eng, Scripts: scripts, ScriptsRoot: channelsDir, Log: slog.New(slog.DiscardHandler)}
+	srv := &Server{
+		Eng:         f.Eng,
+		Scripts:     f.Scripts,
+		ScriptsRoot: channelsDir,
+		Auth:        AuthConfig{Token: testToken},
+		Log:         slog.New(slog.DiscardHandler),
+	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return &harness{t: t, ts: ts, eng: eng, st: st, work: work, inDir: inDir, scripts: scripts}
+	return &harness{t: t, ts: ts, srv: srv, eng: f.Eng, st: f.Store, work: work, inDir: inDir, scripts: f.Scripts}
 }
 
 func (h *harness) do(method, path string, body string) (int, []byte) {
@@ -114,6 +108,7 @@ func (h *harness) do(method, path string, body string) (int, []byte) {
 	if err != nil {
 		h.t.Fatal(err)
 	}
+	req.Header.Set("Authorization", "Bearer "+testToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		h.t.Fatal(err)
@@ -142,19 +137,20 @@ func (h *harness) feedMessage(content string) int64 {
 	if err := os.WriteFile(filepath.Join(h.inDir, name), []byte(content), 0o644); err != nil {
 		h.t.Fatal(err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	var id int64
+	testutil.Eventually(h.t, "new message SENT", func() bool {
 		list, err := h.st.ListMessages(context.Background(), "feed", store.ListQuery{Limit: 1})
-		if err == nil && len(list) > 0 && list[0].ID > baseline {
-			d, err := h.st.GetMessage(context.Background(), list[0].ID)
-			if err == nil && len(d.Destinations) > 0 && d.Destinations[0].State == message.StateSent {
-				return d.ID
-			}
+		if err != nil || len(list) == 0 || list[0].ID <= baseline {
+			return false
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	h.t.Fatal("message never reached SENT")
-	return 0
+		d, err := h.st.GetMessage(context.Background(), list[0].ID)
+		if err == nil && len(d.Destinations) > 0 && d.Destinations[0].State == message.StateSent {
+			id = d.ID
+			return true
+		}
+		return false
+	})
+	return id
 }
 
 func TestStatusAndChannels(t *testing.T) {
@@ -329,7 +325,7 @@ func TestScriptEndpoints(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("channel scripts = %d", code)
 	}
-	var refs []scriptRef
+	var refs []engine.ScriptRef
 	h.decode(raw, &refs)
 	if len(refs) != 1 || refs[0].Role != "transformer" || refs[0].LastError != "" {
 		t.Fatalf("refs = %+v", refs)
@@ -377,12 +373,138 @@ func TestScriptEndpoints(t *testing.T) {
 	}
 }
 
+// TestScriptEndpointConfinement pins down what /api/scripts refuses to
+// touch. ScriptsRoot is the channels directory, so an endpoint that writes
+// any file under it could rewrite channel YAML and have the reload action
+// apply it.
+func TestScriptEndpointConfinement(t *testing.T) {
+	h := newHarness(t)
+	channelsDir := filepath.Join(h.work, "channels")
+	scriptsDir := filepath.Join(channelsDir, "scripts")
+
+	// A file outside the root, reachable through a symlink inside it.
+	outside := filepath.Join(h.work, "outside.js")
+	if err := os.WriteFile(outside, []byte("function transform(msg) {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(scriptsDir, "link.js")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	// A .js file under the root that no channel references.
+	stray := filepath.Join(scriptsDir, "stray.js")
+	if err := os.WriteFile(stray, []byte("function transform(msg) {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := os.ReadFile(filepath.Join(channelsDir, "feed.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rejected := map[string]string{
+		"channel yaml":           filepath.Join(channelsDir, "feed.yaml"),
+		"new yaml":               filepath.Join(channelsDir, "evil.yaml"),
+		"root itself":            channelsDir,
+		"scripts dir":            scriptsDir,
+		"symlink escaping root":  link,
+		"unreferenced script":    stray,
+		"traversal":              filepath.Join(scriptsDir, "..", "feed.yaml"),
+		"traversal with js name": filepath.Join(scriptsDir, "..", "..", "outside.js"),
+		"empty":                  "",
+	}
+	for name, p := range rejected {
+		t.Run(name, func(t *testing.T) {
+			if code, raw := h.do("GET", "/api/scripts?path="+p, ""); code != 400 {
+				t.Errorf("read = %d %s", code, raw)
+			}
+			if code, raw := h.do("PUT", "/api/scripts?path="+p, "id: pwned\n"); code != 400 {
+				t.Errorf("write = %d %s", code, raw)
+			}
+			if code, _ := h.do("GET", "/scripts/edit?path="+p, ""); code != 400 {
+				t.Errorf("editor page = %d", code)
+			}
+		})
+	}
+	after, err := os.ReadFile(filepath.Join(channelsDir, "feed.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("channel YAML was modified through the scripts endpoint")
+	}
+	if _, err := os.Stat(filepath.Join(channelsDir, "evil.yaml")); !os.IsNotExist(err) {
+		t.Fatal("a new file was created through the scripts endpoint")
+	}
+	if got, _ := os.ReadFile(outside); string(got) != "function transform(msg) {}" {
+		t.Fatal("file outside the root was modified through a symlink")
+	}
+
+	// Error bodies name no filesystem detail.
+	_, raw := h.do("GET", "/api/scripts?path="+link, "")
+	if strings.Contains(string(raw), h.work) {
+		t.Errorf("error leaks the filesystem path: %s", raw)
+	}
+}
+
+// TestScriptWriteTruncatedBody: a client that dies mid-upload must not
+// leave a half-written script on disk for the hot-reload watcher to
+// compile.
+func TestScriptWriteTruncatedBody(t *testing.T) {
+	h := newHarness(t)
+	path := filepath.Join(h.work, "channels", "scripts", "upper.js")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(h.ts.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	partial := "function transform(msg) { msg.set('PID-5.1', 'TRUNC"
+	fmt.Fprintf(conn, "PUT /api/scripts?path=%s HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\n\r\n%s",
+		path, testToken, len(partial)+100, partial)
+	// Half-close so the server sees EOF before Content-Length is satisfied.
+	if tc, ok := conn.(*net.TCPConn); ok {
+		tc.CloseWrite()
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode != 400 {
+			t.Errorf("truncated upload = %d, want 400", resp.StatusCode)
+		}
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("truncated body was written: %q", after)
+	}
+}
+
+func TestScriptWriteTooLarge(t *testing.T) {
+	h := newHarness(t)
+	path := filepath.Join(h.work, "channels", "scripts", "upper.js")
+	code, raw := h.do("PUT", "/api/scripts?path="+path, strings.Repeat("/", maxScriptSize+1))
+	if code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized write = %d %s", code, raw)
+	}
+	if got, _ := os.ReadFile(path); strings.HasPrefix(string(got), "//") {
+		t.Fatal("oversized body was written")
+	}
+}
+
 func TestSSEStream(t *testing.T) {
 	h := newHarness(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "GET", h.ts.URL+"/api/channels/feed/events", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -392,7 +514,12 @@ func TestSSEStream(t *testing.T) {
 		t.Fatalf("content-type = %q", ct)
 	}
 
-	go h.feedMessage(sampleHL7)
+	// Drop the file directly rather than via feedMessage: that helper
+	// calls t.Fatal, which must not run on a non-test goroutine.
+	name := fmt.Sprintf("m-%d.hl7", time.Now().UnixNano())
+	if err := os.WriteFile(filepath.Join(h.inDir, name), []byte(sampleHL7), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	var sawMessageEvent bool
@@ -406,5 +533,127 @@ func TestSSEStream(t *testing.T) {
 	}
 	if !sawMessageEvent {
 		t.Fatalf("no message event on SSE stream (scan err: %v)", scanner.Err())
+	}
+}
+
+func TestListLimitValidation(t *testing.T) {
+	h := newHarness(t)
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{"", 200},
+		{"?limit=10", 200},
+		{"?limit=100000", 200}, // clamped, not rejected
+		{"?limit=0", 400},
+		{"?limit=-5", 400},
+		{"?limit=ten", 400},
+		{"?before_id=abc", 400},
+		{"?before_id=-1", 400},
+		{"?before_id=5", 200},
+	} {
+		for _, path := range []string{"/api/channels/feed/messages", "/api/channels/feed/dlq"} {
+			if strings.Contains(tc.query, "before_id") && strings.HasSuffix(path, "dlq") {
+				continue
+			}
+			code, raw := h.do("GET", path+tc.query, "")
+			if code != tc.want {
+				t.Errorf("GET %s%s = %d %s, want %d", path, tc.query, code, raw, tc.want)
+			}
+		}
+	}
+}
+
+func TestQueryLimitClamps(t *testing.T) {
+	req := httptest.NewRequest("GET", "/x?limit=99999", nil)
+	if n, err := queryLimit(req); err != nil || n != maxListLimit {
+		t.Errorf("clamped limit = %d, %v", n, err)
+	}
+	req = httptest.NewRequest("GET", "/x", nil)
+	if n, err := queryLimit(req); err != nil || n != defaultListLimit {
+		t.Errorf("default limit = %d, %v", n, err)
+	}
+}
+
+func TestSSEStreamCap(t *testing.T) {
+	h := newHarness(t)
+	h.srv.MaxEventStreams = 2
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	open := func() *http.Response {
+		t.Helper()
+		req, _ := http.NewRequestWithContext(ctx, "GET", h.ts.URL+"/api/events", nil)
+		req.Header.Set("Authorization", "Bearer "+testToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return resp
+	}
+	first, second := open(), open()
+	if first.StatusCode != 200 || second.StatusCode != 200 {
+		t.Fatalf("first streams = %d, %d", first.StatusCode, second.StatusCode)
+	}
+	third := open()
+	if third.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("third stream = %d, want 503", third.StatusCode)
+	}
+	// Closing one stream frees a slot.
+	first.Body.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if resp := open(); resp.StatusCode == 200 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("slot never freed after closing a stream")
+}
+
+// TestSSEChannelFilterAndResync: a per-channel stream passes only that
+// channel's events, and resync markers pass regardless of channel.
+func TestSSEChannelFilterAndResync(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", h.ts.URL+"/api/channels/feed/events", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Read the initial comment so the subscription is live before publishing.
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() && !strings.HasPrefix(scanner.Text(), ": connected") {
+	}
+	bus := h.eng.Bus()
+	bus.Publish(events.Event{Type: events.TypeMessage, ChannelID: "other", MessageID: 1, State: message.StateSent})
+	bus.Publish(events.Event{Type: events.TypeMessage, ChannelID: "feed", MessageID: 2, State: message.StateSent})
+	bus.Publish(events.Event{Type: events.TypeResync})
+
+	var seen []string
+	for scanner.Scan() && len(seen) < 2 {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			seen = append(seen, strings.TrimPrefix(line, "data: "))
+		}
+	}
+	if len(seen) != 2 {
+		t.Fatalf("events = %v (scan err %v)", seen, scanner.Err())
+	}
+	if !strings.Contains(seen[0], `"channelId":"feed"`) || !strings.Contains(seen[0], `"messageId":2`) {
+		t.Errorf("first event should be feed's, got %s", seen[0])
+	}
+	if !strings.Contains(seen[1], `"type":"resync"`) {
+		t.Errorf("second event should be the resync, got %s", seen[1])
+	}
+	for _, ev := range seen {
+		if strings.Contains(ev, `"other"`) {
+			t.Errorf("another channel's event leaked through the filter: %s", ev)
+		}
 	}
 }

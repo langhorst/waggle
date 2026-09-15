@@ -22,10 +22,13 @@ package xmlfmt
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/langhorst/waggle/internal/format"
 	"github.com/langhorst/waggle/internal/message"
@@ -41,16 +44,27 @@ const (
 
 func init() { format.Register(DataType{}) }
 
-// DataType implements format.DataType (and format.SegmentJoiner) for XML.
+// DataType implements format.DataType for XML.
 type DataType struct{}
 
 func (DataType) Name() string { return "xml" }
 
-// JoinSegmentPath implements format.SegmentJoiner: segment-relative script
-// paths join with the dialect's step separator (seg.get('id/@value') on an
-// "entry" handle resolves entry/id/@value against that occurrence).
-func (DataType) JoinSegmentPath(segName, rel string) string {
-	return segName + "/" + rel
+// ResolveFrom implements format.DataType: rel is a path of steps below the
+// element (el.get('id/@value') on an "entry" handle resolves
+// entry/id/@value against exactly that occurrence).
+func (d DataType) ResolveFrom(root, el *message.Node, rel string) ([]*message.Node, error) {
+	return d.Resolve(scope(root, el), el.Name+"/"+rel)
+}
+
+// SetFrom implements format.DataType.
+func (d DataType) SetFrom(root, el *message.Node, rel string, value any) error {
+	return d.Set(scope(root, el), el.Name+"/"+rel, value)
+}
+
+// scope is a root holding exactly one element; it shares the node, so
+// writes through it land in the real tree.
+func scope(root, el *message.Node) *message.Node {
+	return &message.Node{Name: root.Name, Children: []*message.Node{el}}
 }
 
 // ---- parse ----
@@ -64,18 +78,25 @@ type parser struct {
 	stack []nsFrame
 }
 
+// MaxDepth bounds element nesting. element recurses once per level, and a
+// payload of nothing but "<a><a><a>" within the transport's size limit
+// would otherwise overflow the goroutine stack, which is a fatal error
+// rather than a recoverable panic.
+const MaxDepth = 512
+
 func (DataType) Parse(raw []byte) (*message.Node, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return nil, fmt.Errorf("xml: empty message")
 	}
 	p := &parser{dec: xml.NewDecoder(bytes.NewReader(raw))}
 	p.dec.Strict = true
+	p.dec.CharsetReader = charsetReader
 	root := &message.Node{Name: "xml"}
 
 	sawElement := false
 	for {
 		tok, err := p.dec.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -97,7 +118,7 @@ func (DataType) Parse(raw []byte) (*message.Node, error) {
 			// other processing instructions (canonical form).
 			if t.Target == "xml" && !sawElement {
 				root.Children = append(root.Children,
-					&message.Node{Name: "?xml", Kind: KindDecl, Value: string(t.Inst)})
+					&message.Node{Name: "?xml", Kind: KindDecl, Value: canonicalDecl(string(t.Inst))})
 			}
 		case xml.CharData:
 			if len(bytes.TrimSpace(t)) > 0 {
@@ -115,6 +136,9 @@ func (DataType) Parse(raw []byte) (*message.Node, error) {
 
 // element consumes one element (start tag already read) into a node.
 func (p *parser) element(start xml.StartElement) (*message.Node, error) {
+	if len(p.stack) >= MaxDepth {
+		return nil, fmt.Errorf("nesting deeper than %d levels", MaxDepth)
+	}
 	frame := nsFrame{}
 	for _, a := range start.Attr {
 		switch {
@@ -136,6 +160,7 @@ func (p *parser) element(start xml.StartElement) (*message.Node, error) {
 	// Collect content in order: text runs and child elements.
 	type item struct {
 		text string
+		ws   bool // whitespace-only text run
 		el   *message.Node
 	}
 	var items []item
@@ -152,10 +177,7 @@ func (p *parser) element(start xml.StartElement) (*message.Node, error) {
 			}
 			items = append(items, item{el: child})
 		case xml.CharData:
-			// Whitespace-only runs are formatting; drop them (canonical).
-			if len(bytes.TrimSpace(t)) > 0 {
-				items = append(items, item{text: string(t)})
-			}
+			items = append(items, item{text: string(t), ws: len(bytes.TrimSpace(t)) == 0})
 		case xml.EndElement:
 			hasElements := false
 			for _, it := range items {
@@ -165,7 +187,9 @@ func (p *parser) element(start xml.StartElement) (*message.Node, error) {
 				}
 			}
 			if !hasElements {
-				// Simple content: concatenated text lives in Value.
+				// Simple content: the text is the value, whitespace and
+				// all. <a> </a> holds a space; only formatting between
+				// child elements is dropped.
 				var b strings.Builder
 				for _, it := range items {
 					b.WriteString(it.text)
@@ -177,6 +201,9 @@ func (p *parser) element(start xml.StartElement) (*message.Node, error) {
 				if it.el != nil {
 					n.Children = append(n.Children, it.el)
 					continue
+				}
+				if it.ws {
+					continue // formatting between elements (canonical form)
 				}
 				n.Children = append(n.Children,
 					&message.Node{Name: "#text", Kind: KindText, Value: it.text})
@@ -196,6 +223,9 @@ func (p *parser) elementName(name xml.Name) string {
 	if name.Space == "" {
 		return name.Local
 	}
+	if name.Space == xmlNamespace {
+		return "xml:" + name.Local
+	}
 	if prefix, ok := p.lookupPrefix(name.Space, true); ok {
 		if prefix == "" {
 			return name.Local // default namespace
@@ -213,11 +243,84 @@ func (p *parser) attrName(name xml.Name) string {
 		return name.Local
 	case name.Space == "xmlns":
 		return "xmlns:" + name.Local
+	case name.Space == xmlNamespace:
+		// The xml prefix is bound by definition, never declared, so the
+		// decoder resolves it to the URI; map it straight back (xml:lang,
+		// xml:space).
+		return "xml:" + name.Local
 	}
 	if prefix, ok := p.lookupPrefix(name.Space, false); ok {
 		return prefix + ":" + name.Local
 	}
 	return name.Space + ":" + name.Local
+}
+
+// xmlNamespace is the URI the reserved xml prefix is bound to.
+const xmlNamespace = "http://www.w3.org/XML/1998/namespace"
+
+// charsetReader lets the decoder read the single-byte encodings legacy
+// feeds still declare. The canonical form is always UTF-8; canonicalDecl
+// rewrites the declaration to match.
+func charsetReader(label string, input io.Reader) (io.Reader, error) {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "utf-8", "utf8", "us-ascii", "ascii":
+		return input, nil
+	case "iso-8859-1", "iso8859-1", "latin1", "l1", "iso_8859-1":
+		return &latin1Reader{r: input}, nil
+	case "windows-1252", "cp1252":
+		return &latin1Reader{r: input, cp1252: true}, nil
+	}
+	return nil, fmt.Errorf("unsupported encoding %q", label)
+}
+
+// latin1Reader transcodes ISO-8859-1 (or Windows-1252) bytes to UTF-8.
+type latin1Reader struct {
+	r      io.Reader
+	cp1252 bool
+	buf    [512]byte
+	pend   []byte
+}
+
+// cp1252High maps bytes 0x80-0x9F of Windows-1252 to code points; zero
+// marks the five undefined positions, which pass through as U+0080-U+009F.
+var cp1252High = [32]rune{
+	0x20AC, 0, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0, 0x017D, 0,
+	0, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0, 0x017E, 0x0178,
+}
+
+func (l *latin1Reader) Read(p []byte) (int, error) {
+	if len(l.pend) == 0 {
+		n, err := l.r.Read(l.buf[:])
+		if n == 0 {
+			return 0, err
+		}
+		out := make([]byte, 0, n*2)
+		for _, b := range l.buf[:n] {
+			r := rune(b)
+			if l.cp1252 && b >= 0x80 && b < 0xA0 {
+				if mapped := cp1252High[b-0x80]; mapped != 0 {
+					r = mapped
+				}
+			}
+			out = utf8.AppendRune(out, r)
+		}
+		l.pend = out
+		if err != nil && !errors.Is(err, io.EOF) {
+			return 0, err
+		}
+	}
+	n := copy(p, l.pend)
+	l.pend = l.pend[n:]
+	return n, nil
+}
+
+// declEncoding matches the encoding pseudo-attribute of an XML declaration.
+var declEncoding = regexp.MustCompile(`encoding\s*=\s*("[^"]*"|'[^']*')`)
+
+// canonicalDecl rewrites a declaration's encoding to UTF-8, which is what
+// Serialize emits regardless of what the input declared.
+func canonicalDecl(inst string) string {
+	return declEncoding.ReplaceAllString(inst, `encoding="UTF-8"`)
 }
 
 // lookupPrefix finds the innermost prefix bound to uri. allowDefault
@@ -413,7 +516,8 @@ func matchChildren(n *message.Node, s step) []*message.Node {
 	return out
 }
 
-func (DataType) Set(root *message.Node, pathExpr, value string) error {
+func (DataType) Set(root *message.Node, pathExpr string, v any) error {
+	value := format.String(v)
 	steps, err := parsePath(pathExpr)
 	if err != nil {
 		return err
@@ -436,6 +540,13 @@ func (DataType) Set(root *message.Node, pathExpr, value string) error {
 		occ := s.occurrence
 		if occ == 0 {
 			occ = 1
+		}
+		if cur == root {
+			// One document element: a first step naming anything else
+			// would append a second root and fail at Serialize.
+			if doc := documentElement(root); doc != nil && (doc.Name != s.name || occ != 1) {
+				return fmt.Errorf("xml: path %q: document element is %q", pathExpr, doc.Name)
+			}
 		}
 		cur = childOccurrence(cur, s.name, occ)
 	}

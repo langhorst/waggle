@@ -1,4 +1,5 @@
 {{define "_messages.html"}}
+{{if .Error}}<div class="p-3 mb-3 text-sm text-red-800 rounded-lg bg-red-50 dark:bg-gray-800 dark:text-red-400" role="alert">{{.Error}}</div>{{end}}
 <div class="relative overflow-x-auto shadow-md sm:rounded-lg">
   <table class="w-full text-sm text-left text-gray-500 dark:text-gray-400">
     <thead class="text-xs text-gray-700 uppercase bg-gray-100 dark:bg-gray-700 dark:text-gray-400">
@@ -27,5 +28,11 @@
       {{end}}
     </tbody>
   </table>
+  {{if .NextBefore}}
+  <div class="p-3 text-center bg-white dark:bg-gray-800">
+    <button hx-get="/ui/channels/{{.ChannelID}}/messages?state={{.State}}&before_id={{.NextBefore}}" hx-target="#messages"
+      class="text-xs font-medium text-blue-600 hover:underline dark:text-blue-400">older messages</button>
+  </div>
+  {{end}}
 </div>
 {{end}}

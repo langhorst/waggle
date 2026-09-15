@@ -62,8 +62,11 @@ func TestCanonicalization(t *testing.T) {
 		`<a><![CDATA[5 < 6 & true]]></a>`: `<a>5 &lt; 6 &amp; true</a>`,
 		// Comments, PIs, and DOCTYPE are dropped.
 		`<!DOCTYPE a><a><!-- gone --><b/><?pi data?></a>`: `<a><b/></a>`,
-		// Whitespace-only text in simple content is formatting too.
-		"<a>  \n </a>": `<a/>`,
+		// Whitespace-only simple content is a value, not formatting:
+		// <a> </a> holds a space and must not collapse to <a/>.
+		"<a>  \n </a>": "<a>  \n </a>",
+		// Whitespace between child elements is formatting.
+		"<a> <b/> </a>": `<a><b/></a>`,
 	} {
 		root, err := dt.Parse([]byte(in))
 		if err != nil {
@@ -77,6 +80,87 @@ func TestCanonicalization(t *testing.T) {
 	}
 }
 
+// TestXMLNamespacePrefixRoundTrips: the xml prefix is bound by definition
+// and never declared, so the decoder hands back its URI. It must serialize
+// as xml:lang again (FHIR narrative and CDA use it).
+func TestXMLNamespacePrefixRoundTrips(t *testing.T) {
+	in := `<div xml:lang="en" xml:space="preserve"><p>hi</p></div>`
+	root, err := dt.Parse([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := dt.Serialize(root)
+	if err != nil {
+		t.Fatalf("Serialize: %v", err)
+	}
+	if string(out) != in {
+		t.Errorf("round trip = %s, want %s", out, in)
+	}
+	nodes, err := dt.Resolve(root, "div/@xml:lang")
+	if err != nil || len(nodes) != 1 || nodes[0].Value != "en" {
+		t.Errorf("div/@xml:lang = %v, %v", nodes, err)
+	}
+}
+
+// TestLegacyEncodingsAreTranscoded: ISO-8859-1 and Windows-1252 feeds parse
+// into UTF-8 text and the declaration is rewritten to say so.
+func TestLegacyEncodingsAreTranscoded(t *testing.T) {
+	cases := map[string]struct {
+		raw  []byte
+		want string
+	}{
+		"latin1": {
+			raw:  append([]byte(`<?xml version="1.0" encoding="ISO-8859-1"?><a>caf`), 0xE9, '<', '/', 'a', '>'),
+			want: "café",
+		},
+		"cp1252 euro": {
+			raw:  append([]byte(`<?xml version="1.0" encoding="windows-1252"?><a>`), 0x80, '<', '/', 'a', '>'),
+			want: "€",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			root, err := dt.Parse(tc.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nodes, _ := dt.Resolve(root, "a")
+			if len(nodes) != 1 || nodes[0].Value != tc.want {
+				t.Fatalf("a = %v, want %q", nodes, tc.want)
+			}
+			out, err := dt.Serialize(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(out), `encoding="UTF-8"`) || !strings.Contains(string(out), tc.want) {
+				t.Errorf("serialized = %s", out)
+			}
+		})
+	}
+	if _, err := dt.Parse([]byte(`<?xml version="1.0" encoding="EBCDIC-CP-US"?><a/>`)); err == nil {
+		t.Error("unsupported encoding accepted")
+	}
+}
+
+// TestSetRejectsSecondDocumentElement: Set with a first step naming anything
+// but the document element used to append a second root, which Serialize
+// then rejected. It fails at Set now.
+func TestSetRejectsSecondDocumentElement(t *testing.T) {
+	root, err := dt.Parse([]byte(patientXML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dt.Set(root, "Observation/id/@value", "x"); err == nil || !strings.Contains(err.Error(), "document element") {
+		t.Fatalf("Set on a foreign root: err = %v", err)
+	}
+	if err := dt.Set(root, "Patient[2]/id/@value", "x"); err == nil {
+		t.Fatal("Set on a second occurrence of the document element accepted")
+	}
+	if _, err := dt.Serialize(root); err != nil {
+		t.Fatalf("tree corrupted by rejected Set: %v", err)
+	}
+}
+
 func TestParseRejectsGarbage(t *testing.T) {
 	for _, raw := range []string{
 		``, `   `, `<a>`, `<a></b>`, `<a/><b/>`, `<a/>trailing`, `plain text`, `<a b=></a>`,
@@ -84,6 +168,24 @@ func TestParseRejectsGarbage(t *testing.T) {
 		if _, err := dt.Parse([]byte(raw)); err == nil {
 			t.Errorf("Parse(%q): expected error", raw)
 		}
+	}
+}
+
+// TestParseDepthLimit: element nesting beyond MaxDepth is a parse error,
+// not a stack overflow.
+func TestParseDepthLimit(t *testing.T) {
+	deep := strings.Repeat("<a>", MaxDepth+1) + strings.Repeat("</a>", MaxDepth+1)
+	if _, err := dt.Parse([]byte(deep)); err == nil || !strings.Contains(err.Error(), "nesting") {
+		t.Fatalf("Parse(%d levels): want nesting error, got %v", MaxDepth+1, err)
+	}
+	ok := strings.Repeat("<a>", MaxDepth) + strings.Repeat("</a>", MaxDepth)
+	if _, err := dt.Parse([]byte(ok)); err != nil {
+		t.Fatalf("Parse(%d levels): %v", MaxDepth, err)
+	}
+	// A megabyte of open tags, the shape of the original crash.
+	huge := strings.Repeat("<a>", 350_000)
+	if _, err := dt.Parse([]byte(huge)); err == nil {
+		t.Fatal("Parse(1 MiB of '<a>'): want error")
 	}
 }
 
@@ -257,9 +359,19 @@ func TestSegments(t *testing.T) {
 	if got := dt.Segments(root, "nope"); len(got) != 0 {
 		t.Errorf("segments(nope) = %v", got)
 	}
-	// Segment-relative paths join with the dialect separator.
-	if p := dt.JoinSegmentPath("name", "family/@value"); p != "name/family/@value" {
-		t.Errorf("JoinSegmentPath = %q", p)
+	// Segment-relative paths resolve against exactly that occurrence.
+	nodes, err := dt.ResolveFrom(root, names[1], "family/@value")
+	if err != nil || len(nodes) != 1 || nodes[0].Value != "Smith" {
+		t.Errorf("ResolveFrom(name[2], family/@value) = %v, %v", nodes, err)
+	}
+	if err := dt.SetFrom(root, names[1], "family/@value", "Jones"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := dt.Resolve(root, "Patient/name[2]/family/@value"); len(got) != 1 || got[0].Value != "Jones" {
+		t.Errorf("SetFrom did not write into the real tree: %v", got)
+	}
+	if got, _ := dt.Resolve(root, "Patient/name[1]/family/@value"); len(got) != 1 || got[0].Value != "Doe" {
+		t.Errorf("SetFrom touched the wrong occurrence: %v", got)
 	}
 }
 
@@ -291,12 +403,13 @@ func TestRegistered(t *testing.T) {
 	if !ok || got.Name() != "xml" {
 		t.Fatal("xml not registered")
 	}
-	// XML has no typed leaves; sets go through the plain string path.
-	if _, ok := got.(format.TypedSetter); ok {
-		t.Fatal("xml should not implement TypedSetter")
+	// XML has no typed leaves: a Go bool is stored as its text.
+	root, _ := got.Parse([]byte(`<a/>`))
+	if err := got.Set(root, "a/flag", true); err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := got.(format.SegmentJoiner); !ok {
-		t.Fatal("xml should implement SegmentJoiner")
+	if out, _ := got.Serialize(root); string(out) != `<a><flag>true</flag></a>` {
+		t.Fatalf("Set through the interface = %s", out)
 	}
 }
 

@@ -1,5 +1,5 @@
 // Package api is the daemon's HTTP surface: a JSON REST API plus SSE event
-// streams, shared by the web UI (phase 7) and any external client. This is
+// streams, shared by the embedded web UI and any external client. This is
 // the full-control interface — channel lifecycle, message inspection,
 // structural diffs, replay, DLQ requeue, and script editing.
 package api
@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/langhorst/waggle/internal/engine"
@@ -31,10 +33,27 @@ type Server struct {
 	// ScriptsRoot confines script file access: only files under this
 	// directory are readable/writable via the API.
 	ScriptsRoot string
-	Log         *slog.Logger
+	// Auth is the credential policy every route is checked against.
+	Auth AuthConfig
+	// MaxEventStreams caps concurrent SSE subscribers; each one costs a
+	// goroutine, a bus buffer, and a heartbeat timer. Default 64.
+	MaxEventStreams int
+	Log             *slog.Logger
 
-	started time.Time
+	started      time.Time
+	eventStreams atomic.Int64
 }
+
+// Limits on list endpoints. The store defaults limit to 50 when unset;
+// the API additionally caps it so a client cannot ask for the whole table.
+const (
+	defaultListLimit = 50
+	maxListLimit     = 500
+)
+
+// responseDeadline bounds how long a non-streaming handler may take to
+// write its response. SSE handlers are exempt (see protect).
+const responseDeadline = 30 * time.Second
 
 // Handler builds the route table.
 func (s *Server) Handler() http.Handler {
@@ -46,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/status", s.handleStatus)
 	mux.HandleFunc("GET /api/channels", s.handleChannels)
+	mux.HandleFunc("GET /api/channels/{id}", s.handleChannel)
 	mux.HandleFunc("POST /api/channels/{id}/start", s.lifecycle("start"))
 	mux.HandleFunc("POST /api/channels/{id}/stop", s.lifecycle("stop"))
 	mux.HandleFunc("POST /api/channels/{id}/pause", s.lifecycle("pause"))
@@ -64,8 +84,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/channels/{id}/events", s.handleEvents)
 
 	s.registerWebUI(mux)
-	return mux
+	return s.protect(mux)
 }
+
+var (
+	errUnauthorized = errors.New("authentication required")
+	errCrossSite    = errors.New("cross-site request rejected")
+)
 
 func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -79,13 +104,50 @@ func (s *Server) writeError(w http.ResponseWriter, status int, err error) {
 	s.writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
+// writeInternalError logs the real error and answers with a generic
+// message: internal errors carry filesystem paths and SQL detail that
+// belong in the log, not in a response body.
+func (s *Server) writeInternalError(w http.ResponseWriter, what string, err error) {
+	s.Log.Error(what, "error", err)
+	s.writeError(w, http.StatusInternalServerError, errors.New(what+" failed"))
+}
+
+// writeEngineError maps engine errors onto status codes.
+func (s *Server) writeEngineError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, engine.ErrUnknownChannel):
+		s.writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, engine.ErrUnknownAction):
+		s.writeError(w, http.StatusBadRequest, err)
+	case errors.Is(err, store.ErrNotFound):
+		s.writeError(w, http.StatusNotFound, err)
+	default:
+		// Lifecycle failures (a port in use, a broken script) are the
+		// caller's business to see.
+		s.writeError(w, http.StatusInternalServerError, err)
+	}
+}
+
 func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		s.writeError(w, http.StatusNotFound, err)
 	default:
-		s.writeError(w, http.StatusInternalServerError, err)
+		s.writeInternalError(w, "store query", err)
 	}
+}
+
+// queryLimit parses the limit query parameter, defaulting and clamping it.
+func queryLimit(r *http.Request) (int, error) {
+	v := r.URL.Query().Get("limit")
+	if v == "" {
+		return defaultListLimit, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("invalid limit %q", v)
+	}
+	return min(n, maxListLimit), nil
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -103,27 +165,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// channelInfo is the list payload: engine info enriched with counts.
-type channelInfo struct {
-	engine.Info
-	Counts     map[message.State]int `json:"counts,omitempty"`
-	QueueDepth map[string]int        `json:"queueDepth,omitempty"`
+func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
+	out, err := s.Eng.ChannelSummaries(r.Context())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, out)
 }
 
-func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
-	infos := s.Eng.Channels()
-	out := make([]channelInfo, 0, len(infos))
-	for _, info := range infos {
-		ci := channelInfo{Info: info}
-		if st := s.Eng.Store(); st != nil {
-			if counts, err := st.MessageCounts(r.Context(), info.ID); err == nil {
-				ci.Counts = counts
-			}
-			if depth, err := st.QueueDepth(r.Context(), info.ID); err == nil {
-				ci.QueueDepth = depth
-			}
-		}
-		out = append(out, ci)
+func (s *Server) handleChannel(w http.ResponseWriter, r *http.Request) {
+	out, err := s.Eng.ChannelSummary(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.writeEngineError(w, err)
+		return
 	}
 	s.writeJSON(w, http.StatusOK, out)
 }
@@ -131,23 +186,8 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 func (s *Server) lifecycle(action string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		var err error
-		switch action {
-		case "start":
-			err = s.Eng.Start(r.Context(), id)
-		case "stop":
-			err = s.Eng.Stop(id)
-		case "pause":
-			err = s.Eng.Pause(id)
-		case "reload":
-			err = s.Eng.ReloadChannel(r.Context(), id)
-		}
-		if err != nil {
-			status := http.StatusInternalServerError
-			if strings.Contains(err.Error(), "unknown channel") {
-				status = http.StatusNotFound
-			}
-			s.writeError(w, status, err)
+		if err := s.Eng.Lifecycle(r.Context(), id, action); err != nil {
+			s.writeEngineError(w, err)
 			return
 		}
 		ch, _ := s.Eng.Channel(id)
@@ -161,12 +201,19 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusNotImplemented, errors.New("persistence disabled"))
 		return
 	}
-	q := store.ListQuery{}
-	if v := r.URL.Query().Get("limit"); v != "" {
-		q.Limit, _ = strconv.Atoi(v)
+	limit, err := queryLimit(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
 	}
+	q := store.ListQuery{Limit: limit}
 	if v := r.URL.Query().Get("before_id"); v != "" {
-		q.BeforeID, _ = strconv.ParseInt(v, 10, 64)
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || id < 0 {
+			s.writeError(w, http.StatusBadRequest, fmt.Errorf("invalid before_id %q", v))
+			return
+		}
+		q.BeforeID = id
 	}
 	if v := r.URL.Query().Get("state"); v != "" {
 		q.State = message.State(v)
@@ -190,7 +237,7 @@ type messagePayload struct {
 }
 
 func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
+	id, err := pathID(r)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
@@ -213,7 +260,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
+	id, err := pathID(r)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
@@ -232,7 +279,7 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
+	id, err := pathID(r)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
@@ -253,7 +300,7 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
+	id, err := pathID(r)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
@@ -276,9 +323,10 @@ func (s *Server) handleDLQ(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusNotImplemented, errors.New("persistence disabled"))
 		return
 	}
-	limit := 50
-	if v := r.URL.Query().Get("limit"); v != "" {
-		limit, _ = strconv.Atoi(v)
+	limit, err := queryLimit(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
 	}
 	entries, err := st.DeadLetters(r.Context(), r.PathValue("id"), limit)
 	if err != nil {
@@ -292,7 +340,7 @@ func (s *Server) handleDLQ(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "id")
+	id, err := pathID(r)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
@@ -309,65 +357,89 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "requeued"})
 }
 
-// scriptRef describes one script a channel references.
-type scriptRef struct {
-	Role string `json:"role"` // "filter", "transformer", "destination-filter", ...
-	Path string `json:"path"` // resolved path, usable with /api/scripts
-	// LastError is the most recent compile error ("" when healthy).
-	LastError string `json:"lastError,omitempty"`
-}
-
 func (s *Server) handleChannelScripts(w http.ResponseWriter, r *http.Request) {
-	cfg, ok := s.Eng.Config(r.PathValue("id"))
-	if !ok {
-		s.writeError(w, http.StatusNotFound, fmt.Errorf("unknown channel %q", r.PathValue("id")))
+	refs, err := s.Eng.ScriptRefs(r.PathValue("id"))
+	if err != nil {
+		s.writeEngineError(w, err)
 		return
-	}
-	var compileErrors map[string]string
-	if s.Scripts != nil {
-		compileErrors = s.Scripts.Scripts()
-	}
-	refs := []scriptRef{}
-	add := func(role, p string) {
-		if p == "" {
-			return
-		}
-		resolved := cfg.ResolvePath(p)
-		refs = append(refs, scriptRef{Role: role, Path: resolved, LastError: compileErrors[resolved]})
-	}
-	add("filter", cfg.Filter)
-	for _, t := range cfg.Transformers {
-		add("transformer", t)
-	}
-	for _, d := range cfg.Destinations {
-		add("destination-filter:"+d.ID, d.Filter)
-		for _, t := range d.Transformers {
-			add("destination-transformer:"+d.ID, t)
-		}
 	}
 	s.writeJSON(w, http.StatusOK, refs)
 }
 
-// confineScriptPath resolves p and ensures it stays inside ScriptsRoot.
+// errScriptPath is the one error the script endpoints return for a path
+// they will not serve. The reason is logged, never echoed: the specific
+// check that failed is of no use to a legitimate editor and of some use
+// to anyone probing the filesystem.
+var errScriptPath = errors.New("path is not an editable script of a loaded channel")
+
+// confineScriptPath resolves p and decides whether the script endpoints may
+// touch it. A path qualifies only when every check holds:
+//
+//   - it is a .js file that a loaded channel references (the editor only
+//     ever links those; ScriptsRoot also holds the channel YAML, which
+//     must stay out of reach of an endpoint that can rewrite files);
+//   - after resolving symlinks it still lives under ScriptsRoot.
+//
+// The returned path is absolute with symlinks resolved, so reads and writes
+// land on the real file.
 func (s *Server) confineScriptPath(p string) (string, error) {
+	real, err := s.resolveScriptPath(p)
+	if err != nil {
+		s.Log.Warn("script path rejected", "path", p, "reason", err)
+		return "", errScriptPath
+	}
+	return real, nil
+}
+
+func (s *Server) resolveScriptPath(p string) (string, error) {
 	if p == "" {
 		return "", errors.New("path is required")
 	}
 	if s.ScriptsRoot == "" {
 		return "", errors.New("script editing is not configured")
 	}
-	root, err := filepath.Abs(s.ScriptsRoot)
-	if err != nil {
-		return "", err
+	if strings.ToLower(filepath.Ext(p)) != ".js" {
+		return "", errors.New("not a .js file")
 	}
 	abs, err := filepath.Abs(p)
 	if err != nil {
 		return "", err
 	}
-	if abs != root && !strings.HasPrefix(abs, root+string(filepath.Separator)) {
-		return "", fmt.Errorf("path %q is outside the configured scripts root", p)
+	if !s.isReferencedScript(abs) {
+		return "", errors.New("not referenced by any loaded channel")
 	}
-	return abs, nil
+	root, err := filepath.EvalSymlinks(s.ScriptsRoot)
+	if err != nil {
+		return "", fmt.Errorf("scripts root: %w", err)
+	}
+	if root, err = filepath.Abs(root); err != nil {
+		return "", err
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(real, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("resolves to %s, outside the scripts root", real)
+	}
+	return real, nil
+}
+
+// isReferencedScript reports whether abs is one of the script files a
+// loaded channel configuration points at.
+func (s *Server) isReferencedScript(abs string) bool {
+	for _, info := range s.Eng.Channels() {
+		cfg, ok := s.Eng.Config(info.ID)
+		if !ok {
+			continue
+		}
+		for _, sp := range cfg.ScriptPaths() {
+			if resolved, err := filepath.Abs(sp); err == nil && resolved == abs {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Server) handleScriptRead(w http.ResponseWriter, r *http.Request) {
@@ -379,9 +451,9 @@ func (s *Server) handleScriptRead(w http.ResponseWriter, r *http.Request) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			s.writeError(w, http.StatusNotFound, err)
+			s.writeError(w, http.StatusNotFound, errors.New("script not found"))
 		} else {
-			s.writeError(w, http.StatusInternalServerError, err)
+			s.writeInternalError(w, "reading script", err)
 		}
 		return
 	}
@@ -389,33 +461,35 @@ func (s *Server) handleScriptRead(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(raw)
 }
 
+// maxScriptSize bounds a PUT /api/scripts body.
+const maxScriptSize = 1 << 20
+
 func (s *Server) handleScriptWrite(w http.ResponseWriter, r *http.Request) {
 	path, err := s.confineScriptPath(r.URL.Query().Get("path"))
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	body := make([]byte, 0, 4096)
-	buf := make([]byte, 4096)
-	for {
-		n, readErr := r.Body.Read(buf)
-		body = append(body, buf[:n]...)
-		if len(body) > 1<<20 {
-			s.writeError(w, http.StatusRequestEntityTooLarge, errors.New("script too large (1 MiB max)"))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxScriptSize))
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			s.writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("script too large (%d bytes max)", maxScriptSize))
 			return
 		}
-		if readErr != nil {
-			break
-		}
+		// A truncated upload must never reach the file: the hot-reload
+		// watcher would compile the fragment.
+		s.writeError(w, http.StatusBadRequest, fmt.Errorf("reading script body: %w", err))
+		return
 	}
-	if err := os.WriteFile(path, body, 0o644); err != nil {
-		s.writeError(w, http.StatusInternalServerError, err)
+	if err := writeFileAtomic(path, body, 0o644); err != nil {
+		s.writeInternalError(w, "writing script", err)
 		return
 	}
 	// Recompile immediately so the editor gets compile feedback; a failed
 	// compile keeps the previous program active in the pipeline.
 	if s.Scripts != nil {
-		if err := s.Scripts.Reload(path); err != nil && !strings.Contains(err.Error(), "not loaded") {
+		if err := s.Scripts.Reload(path); err != nil && !errors.Is(err, script.ErrNotLoaded) {
 			s.writeJSON(w, http.StatusBadRequest, map[string]string{
 				"status": "saved-with-errors",
 				"error":  err.Error(),
@@ -426,10 +500,41 @@ func (s *Server) handleScriptWrite(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
 
-func pathID(r *http.Request, key string) (int64, error) {
-	id, err := strconv.ParseInt(r.PathValue(key), 10, 64)
+// writeFileAtomic replaces path's contents via a temp file and rename so no
+// reader (the script hot-reload watcher included) ever sees a partial
+// write.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { os.Remove(tmpName) }
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		cleanup()
+		return err
+	}
+	return nil
+}
+
+func pathID(r *http.Request) (int64, error) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id <= 0 {
-		return 0, fmt.Errorf("invalid message id %q", r.PathValue(key))
+		return 0, fmt.Errorf("invalid message id %q", r.PathValue("id"))
 	}
 	return id, nil
 }

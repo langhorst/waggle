@@ -1,5 +1,12 @@
 # Waggle daemon configuration.
-listen: ":8420"          # HTTP API + web UI
+listen: "127.0.0.1:8420" # HTTP API + web UI (loopback only by default)
 dataDir: data            # SQLite message store lives here
 channelsDir: channels    # one YAML file per channel
 hotReload: true          # watch channel scripts for changes
+
+# Credentials for the API and web UI. The token works as
+# `Authorization: Bearer <token>` and as the basic-auth password (any user
+# name) so the browser prompt accepts it too. Listening on a non-loopback
+# address requires auth; `disabled: true` opts out explicitly.
+auth:
+  token: change-me

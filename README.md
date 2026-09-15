@@ -23,7 +23,7 @@ of outbound Channel Adapters with **Guaranteed Delivery**.
 
 ```sh
 make run    # build + run the daemon on the examples/ config — web UI on http://localhost:8420
-make tui    # or attach the read-only observer TUI (engine runs in-process)
+make tui    # attach the read-only observer TUI to that daemon (in another terminal)
 ```
 
 (Or without make: `go build -o bin/waggle ./cmd/waggle`, then run
@@ -42,7 +42,7 @@ replay.
 | Message                    | `internal/message.Message` — raw bytes + canonical tree + states  |
 | Message Channel            | Go channels + the per-destination SQLite queue                    |
 | Channel Adapter (inbound)  | `mllp-listener`, `astm-listener`, `http-listener`, `file-reader` |
-| Polling Consumer           | the `file-reader` source                                          |
+| Polling Consumer           | the `file-reader` source (`ackMode` like the network sources)     |
 | Pipes and Filters          | the channel pipeline (`internal/channel`)                         |
 | Message Filter             | `filter:` script — distinct step, drops retain the message        |
 | Message Translator         | `transformers:` script chain (goja JavaScript)                    |
@@ -105,6 +105,15 @@ function transform(msg) {
 }
 ```
 
+For the delimited formats, `msg.set` splits its value on the separators
+below the addressed level, the way the parser splits wire text:
+`msg.set('PID-5', 'DOE^JOHN')` produces two components and
+`msg.set('PID-5', msg.get('PID-5'))` round-trips. Separators at or above
+that level stay literal and are escaped on the wire. For JSON, a key step
+on a non-empty array writes element 0 (what `get` reads), and an index
+step on a non-empty object is an error; populated containers are never
+replaced silently.
+
 Script API: `msg.get/set/getAll/segments`, `msg.raw`, `msg.dataType`,
 `newMessage(dataType)`, `meta`, `logger.info/warn/error`, and
 `response.reject(code, text)` / `response.setAck(code, text)` for
@@ -142,7 +151,10 @@ for the pipeline outcome (AA→200, AR→400, AE→500, hold timeout→504), so 
 the caller. `http-sender` makes Waggle an API client: YAML sets the url,
 method, content type, static headers (Authorization etc.), basic auth, and
 an optional private CA; scripts override per message with
-`meta['http.path']` and `meta['http.method']`. Failure classification
+`meta['http.path']` and `meta['http.method']`; what the listener knew
+about the inbound request lives under `meta['source.http.*']` (path,
+method, query parameters, content type), a separate namespace so a
+listener-to-sender channel never replays the inbound path. Failure classification
 drives Guaranteed Delivery — network errors, 408, 429, and 5xx retry with
 backoff; any other non-2xx is an application rejection that dead-letters
 immediately with the API's response body in the error text.
@@ -192,6 +204,11 @@ workflow, with results flowing up and orders/queries flowing down —
   Covered by `TestFHIRXMLWebhookToHL7`, including 400 for a non-Patient
   document and 500 for malformed XML.
 
+**Intake.** Each channel processes messages on one goroutine, in arrival
+order, from a bounded buffer (`maxPending`, default 256). When the buffer
+is full the source adapter blocks and its transport ACK waits, so a burst
+becomes backpressure on the sender rather than unbounded memory here.
+
 **Delivery.** Each queueing destination has exactly one worker draining
 its FIFO queue: transient failures back off exponentially (jittered,
 capped at 5m) without reordering; application NAKs (AE/AR) dead-letter
@@ -219,8 +236,9 @@ POST   /api/messages/{id}/replay[?destination={destID}]
 ```
 
 The web UI (HTMX + Flowbite, embedded and offline) is served at `/` and is
-the full-control surface; the TUI is a read-only observer that embeds the
-engine directly.
+the full-control surface; the TUI (`waggle tui [-addr host:port] [-token
+…]`) is a read-only observer that attaches to a running daemon over the
+same API and event stream.
 
 ## Configuration
 
@@ -229,10 +247,20 @@ scripts are separate `.js` files referenced by path (relative to the
 channel file). Unknown keys are load-time errors. `retention: -1` keeps
 messages forever; queue-referenced messages are never pruned.
 
+**Auth.** The API and web UI are the full-control surface, so every route
+requires credentials: `auth.token` is accepted as `Authorization: Bearer`
+and as the basic-auth password with any user name (browsers prompt for
+it), and `auth.basicUser`/`auth.basicPassword` add a dedicated login.
+The daemon listens on `127.0.0.1:8420` by default and refuses to bind a
+non-loopback address without credentials unless `auth.disabled: true`.
+State-changing requests that carry a browser `Origin` or `Sec-Fetch-Site`
+header must be same-origin.
+
 ## Development
 
 ```sh
-make check    # the pre-push gate: gofmt check + go vet + race-enabled tests
+make check    # the pre-push gate: lint + race-enabled tests (what CI runs)
+make lint     # gofmt check + go vet + go mod tidy check + golangci-lint
 make test     # plain test run (unit, functional, E2E — no network needed)
 make cover    # race tests with a coverage summary
 make fuzz     # 30s of parser fuzzing per format (FUZZTIME=2m make fuzz for longer)
@@ -240,7 +268,9 @@ make bench    # parser + pipeline benchmarks
 ```
 
 `make help` lists everything; the plain `go test ./...` / `go vet ./...`
-commands behind these targets work as ever.
+commands behind these targets work as ever. `make lint` needs
+[golangci-lint](https://golangci-lint.run/docs/welcome/install/) on the
+path; its configuration lives in `.golangci.yml`.
 
 Package map: `internal/message` (tree, states, diff) · `internal/format/*`
 (data types) · `internal/adapter/*` (Channel Adapters + registry) ·

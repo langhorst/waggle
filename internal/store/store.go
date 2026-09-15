@@ -9,8 +9,10 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -29,18 +31,33 @@ var migrations embed.FS
 // sweeps (a time-based ticker also runs; see Open).
 const pruneCheckEvery = 100
 
-// Store wraps the SQLite database. Safe for concurrent use; writes are
-// serialized on a single connection (WAL mode).
+// Store wraps the SQLite database. Safe for concurrent use. Writes are
+// serialized on a single connection; reads use a small separate pool so
+// the UIs' queries do not queue behind the pipeline's inserts (WAL mode
+// lets readers run alongside the writer).
 type Store struct {
-	db *sql.DB
+	db    *sql.DB // the one writer connection
+	reads *sql.DB // read-only pool
+	// Log receives retention errors and other background failures.
+	// Defaults to slog.Default().
+	Log *slog.Logger
 
 	retMu     sync.Mutex
 	retention map[string]int // channel -> max messages; -1 unlimited
 
+	// wakes holds one signal channel per (channel, destination) queue so a
+	// worker can sleep until Enqueue instead of polling.
+	wakeMu sync.Mutex
+	wakes  map[string]chan struct{}
+
 	inserts     atomic.Int64
+	pruneReq    chan struct{} // nudges pruneLoop; never blocks Record
 	pruneCancel context.CancelFunc
 	pruneDone   chan struct{}
 }
+
+// readPoolSize bounds concurrent read connections.
+const readPoolSize = 4
 
 // Open opens (creating if needed) the database at path and applies pending
 // migrations.
@@ -50,13 +67,27 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
-	// One connection serializes all access: modernc/sqlite performs best
+	// One connection serializes all writes: modernc/sqlite performs best
 	// this way and it sidesteps SQLITE_BUSY between our own goroutines.
 	db.SetMaxOpenConns(1)
-
-	s := &Store{db: db, retention: map[string]int{}}
-	if err := s.migrate(); err != nil {
+	reads, err := sql.Open("sqlite", dsn+"&_pragma=query_only(ON)")
+	if err != nil {
 		db.Close()
+		return nil, fmt.Errorf("store: %w", err)
+	}
+	reads.SetMaxOpenConns(readPoolSize)
+
+	s := &Store{
+		db:        db,
+		reads:     reads,
+		Log:       slog.Default(),
+		retention: map[string]int{},
+		wakes:     map[string]chan struct{}{},
+		pruneReq:  make(chan struct{}, 1),
+	}
+	if err := s.migrate(context.Background()); err != nil {
+		db.Close()
+		reads.Close()
 		return nil, err
 	}
 
@@ -73,11 +104,37 @@ func (s *Store) Close() error {
 		s.pruneCancel()
 		<-s.pruneDone
 	}
-	return s.db.Close()
+	return errors.Join(s.reads.Close(), s.db.Close())
 }
 
-func (s *Store) migrate() error {
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)`); err != nil {
+// Wake returns the signal channel for one destination queue. Enqueue and
+// Requeue send on it (never blocking), so a worker can wait on it and only
+// fall back to polling for retry deadlines.
+func (s *Store) Wake(channelID, destID string) <-chan struct{} {
+	return s.wake(channelID, destID)
+}
+
+func (s *Store) wake(channelID, destID string) chan struct{} {
+	key := channelID + "\x00" + destID
+	s.wakeMu.Lock()
+	defer s.wakeMu.Unlock()
+	ch, ok := s.wakes[key]
+	if !ok {
+		ch = make(chan struct{}, 1)
+		s.wakes[key] = ch
+	}
+	return ch
+}
+
+func (s *Store) signal(channelID, destID string) {
+	select {
+	case s.wake(channelID, destID) <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Store) migrate(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)`); err != nil {
 		return fmt.Errorf("store: migrations table: %w", err)
 	}
 	entries, err := fs.Glob(migrations, "migrations/*.sql")
@@ -87,7 +144,7 @@ func (s *Store) migrate() error {
 	sort.Strings(entries)
 	for _, name := range entries {
 		var applied int
-		if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, name).Scan(&applied); err != nil {
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, name).Scan(&applied); err != nil {
 			return fmt.Errorf("store: %w", err)
 		}
 		if applied > 0 {
@@ -97,15 +154,15 @@ func (s *Store) migrate() error {
 		if err != nil {
 			return err
 		}
-		tx, err := s.db.Begin()
+		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(string(raw)); err != nil {
+		if _, err := tx.ExecContext(ctx, string(raw)); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("store: applying %s: %w", name, err)
 		}
-		if _, err := tx.Exec(`INSERT INTO schema_migrations (name) VALUES (?)`, name); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (name) VALUES (?)`, name); err != nil {
 			tx.Rollback()
 			return err
 		}
@@ -152,7 +209,12 @@ func (s *Store) Record(ctx context.Context, m *message.Message) error {
 	m.ID = id
 
 	if s.inserts.Add(1)%pruneCheckEvery == 0 {
-		s.pruneAll(ctx)
+		// Retention runs on its own goroutine: a DELETE with subselects
+		// does not belong on the pipeline's write path.
+		select {
+		case s.pruneReq <- struct{}{}:
+		default:
+		}
 	}
 	return nil
 }
@@ -231,8 +293,9 @@ func (s *Store) pruneLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.pruneAll(context.Background())
+		case <-s.pruneReq:
 		}
+		s.pruneAll(ctx)
 	}
 }
 
@@ -250,12 +313,15 @@ func (s *Store) pruneAll(ctx context.Context) {
 		}
 		// Keep the newest `keep` messages; never delete a message still
 		// referenced by the delivery queue.
-		_, _ = s.db.ExecContext(ctx, `
+		_, err := s.db.ExecContext(ctx, `
 			DELETE FROM messages
 			WHERE channel_id = ?1
 			  AND id NOT IN (SELECT id FROM messages WHERE channel_id = ?1 ORDER BY id DESC LIMIT ?2)
 			  AND id NOT IN (SELECT message_id FROM destination_queue WHERE channel_id = ?1)`,
 			channelID, keep)
+		if err != nil && ctx.Err() == nil {
+			s.Log.Error("store: retention prune failed", "channel", channelID, "error", err)
+		}
 	}
 }
 

@@ -16,8 +16,10 @@ package jsonfmt
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -42,12 +44,18 @@ type DataType struct{}
 
 func (DataType) Name() string { return "json" }
 
+// MaxDepth bounds container nesting. Parsing recurses once per level, and
+// a payload of nothing but "[[[[" within the transport's size limit would
+// otherwise overflow the goroutine stack, which is a fatal error rather
+// than a recoverable panic. Real documents nest a few dozen levels deep.
+const MaxDepth = 512
+
 func (DataType) Parse(raw []byte) (*message.Node, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	root := &message.Node{Name: "json"}
-	if err := decodeValue(dec, root); err != nil {
-		if err == io.EOF {
+	if err := decodeValue(dec, root, 0); err != nil {
+		if errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("json: empty message")
 		}
 		return nil, fmt.Errorf("json: %w", err)
@@ -59,13 +67,17 @@ func (DataType) Parse(raw []byte) (*message.Node, error) {
 }
 
 // decodeValue reads one JSON value from dec into n (name already set).
-func decodeValue(dec *json.Decoder, n *message.Node) error {
+// depth is the container nesting level of n.
+func decodeValue(dec *json.Decoder, n *message.Node, depth int) error {
 	tok, err := dec.Token()
 	if err != nil {
 		return err
 	}
 	switch t := tok.(type) {
 	case json.Delim:
+		if depth >= MaxDepth {
+			return fmt.Errorf("nesting deeper than %d levels", MaxDepth)
+		}
 		switch t {
 		case '{':
 			n.Kind = KindObject
@@ -75,7 +87,7 @@ func decodeValue(dec *json.Decoder, n *message.Node) error {
 					return err
 				}
 				child := &message.Node{Name: keyTok.(string)}
-				if err := decodeValue(dec, child); err != nil {
+				if err := decodeValue(dec, child, depth+1); err != nil {
 					return err
 				}
 				n.Children = append(n.Children, child)
@@ -86,7 +98,7 @@ func decodeValue(dec *json.Decoder, n *message.Node) error {
 			n.Kind = KindArray
 			for dec.More() {
 				child := &message.Node{Name: elementName(len(n.Children))}
-				if err := decodeValue(dec, child); err != nil {
+				if err := decodeValue(dec, child, depth+1); err != nil {
 					return err
 				}
 				n.Children = append(n.Children, child)
@@ -155,7 +167,7 @@ func encodeValue(buf *bytes.Buffer, n *message.Node) error {
 		}
 		buf.WriteByte(']')
 	case KindNumber:
-		if !json.Valid([]byte(n.Value)) || n.Value == "" {
+		if !numberLiteral.MatchString(n.Value) {
 			return fmt.Errorf("invalid number literal %q", n.Value)
 		}
 		buf.WriteString(n.Value)
@@ -171,6 +183,9 @@ func encodeValue(buf *bytes.Buffer, n *message.Node) error {
 	}
 	return nil
 }
+
+// numberLiteral is the JSON number grammar (RFC 8259 section 6).
+var numberLiteral = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
 
 // effectiveKind returns n.Kind, inferring one for untagged nodes.
 func effectiveKind(n *message.Node) string {
@@ -249,15 +264,14 @@ func lookupKey(n *message.Node, key string) []*message.Node {
 	return out
 }
 
-func (d DataType) Set(root *message.Node, pathExpr, value string) error {
-	return d.SetTyped(root, pathExpr, value)
-}
-
-// SetTyped implements format.TypedSetter: values set from scripts keep their
-// dynamic type (JS numbers stay JSON numbers). Intermediate structure is
-// autovivified — objects for key segments, arrays (null-padded) for index
-// segments; a scalar in the way is converted to the needed container.
-func (DataType) SetTyped(root *message.Node, pathExpr string, value any) error {
+// Set implements format.DataType: values keep their dynamic type (JS
+// numbers stay JSON numbers). Intermediate structure is autovivified:
+// objects for key segments, arrays (null-padded) for index segments; a
+// scalar or empty container in the way is converted to the needed
+// container. A populated container is never silently replaced: a key step
+// on a non-empty array descends into element 0 (get on the same path reads
+// element 0 first), and an index step on a non-empty object is an error.
+func (DataType) Set(root *message.Node, pathExpr string, value any) error {
 	segs, err := parsePath(pathExpr)
 	if err != nil {
 		return err
@@ -268,6 +282,9 @@ func (DataType) SetTyped(root *message.Node, pathExpr string, value any) error {
 	cur := root
 	for _, s := range segs {
 		if s.isIndex {
+			if cur.Kind == KindObject && len(cur.Children) > 0 {
+				return fmt.Errorf("json: path %q: [%d] applied to an object with keys", pathExpr, s.index)
+			}
 			if cur.Kind != KindArray {
 				cur.Kind, cur.Value, cur.Children = KindArray, "", nil
 			}
@@ -277,6 +294,12 @@ func (DataType) SetTyped(root *message.Node, pathExpr string, value any) error {
 			}
 			cur = cur.Children[s.index]
 			continue
+		}
+		if cur.Kind == KindArray && len(cur.Children) > 0 {
+			cur = cur.Children[0]
+			if cur.Kind == KindArray && len(cur.Children) > 0 {
+				return fmt.Errorf("json: path %q: key %q applied to nested arrays", pathExpr, s.key)
+			}
 		}
 		if cur.Kind != KindObject {
 			cur.Kind, cur.Value, cur.Children = KindObject, "", nil
@@ -344,6 +367,17 @@ func (DataType) Segments(root *message.Node, name string) []*message.Node {
 		}
 	}
 	return out
+}
+
+// ResolveFrom implements format.DataType: rel is a path evaluated with the
+// segment (an object or array element) as its root.
+func (d DataType) ResolveFrom(root, seg *message.Node, rel string) ([]*message.Node, error) {
+	return d.Resolve(seg, rel)
+}
+
+// SetFrom implements format.DataType.
+func (d DataType) SetFrom(root, seg *message.Node, rel string, value any) error {
+	return d.Set(seg, rel, value)
 }
 
 // Value renders a leaf as its text (null renders empty) and a container as
