@@ -25,7 +25,17 @@ var templateFS embed.FS
 var staticFS embed.FS
 
 // Vendored frontend assets (fully offline): htmx 1.9.12, Flowbite 2.5.2,
-// and the Tailwind browser runtime that Flowbite's utility classes need.
+// the Tailwind browser runtime that Flowbite's utility classes need, and
+// two files of our own -- app.css, the stylesheet entry point, and
+// codeedit.{js,css}, the script editor's JavaScript highlighter, written
+// rather than vendored so the UI keeps needing no network.
+//
+// Pages link app.css, never flowbite.min.css directly: the two vendored
+// stylesheets disagree about cascade layers (a v3 build that is entirely
+// unlayered against a v4 runtime that layers everything), and app.css is
+// what reconciles them. Its own comment has the details; the short version
+// is that linking Flowbite directly silently disables every dark: variant
+// and every text-*/font-* utility on a form control.
 
 // badgeTmpl renders a state/status pill; going through html/template keeps
 // the label contextually escaped even if it ever stops being a constant.

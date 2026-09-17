@@ -1,7 +1,7 @@
 # Waggle daemon configuration.
 listen: "127.0.0.1:8420" # HTTP API + web UI (loopback only by default)
 dataDir: data            # SQLite message store lives here
-channelsDir: channels    # one YAML file per channel
+channelsDir: examples/channels    # one YAML file per channel
 hotReload: true          # watch channel scripts for changes
 
 # Credentials for the API and web UI. Some form of auth is required: a
@@ -20,5 +20,5 @@ hotReload: true          # watch channel scripts for changes
 # $WAGGLE_TOKEN / $WAGGLE_USER / $WAGGLE_PASSWORD environment variables.
 auth:
   token: change-me
-  # basicUser: ops
-  # basicPassword: a-long-random-password
+  basicUser: admin
+  basicPassword: admin

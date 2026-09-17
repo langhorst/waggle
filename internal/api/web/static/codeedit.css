@@ -1,0 +1,179 @@
+/* Code editor: a syntax-highlighted overlay behind a transparent textarea.
+ *
+ * These rules are deliberately plain CSS rather than Tailwind utilities.
+ * The editor carries a theme of its own -- a dozen token colours in two
+ * schemes -- which belongs in a stylesheet rather than spread across class
+ * attributes; keeping it here also means the editor does not depend on
+ * which utilities the vendored Tailwind build happens to contain. */
+
+:root {
+  /* Light theme. Every token colour clears 4.5:1 on --ce-bg. */
+  --ce-bg: #ffffff;
+  --ce-fg: #1f2937;
+  --ce-border: #d1d5db;
+  --ce-gutter-bg: #f9fafb;
+  --ce-gutter-fg: #9ca3af;
+  --ce-selection: #bfdbfe;
+  --ce-comment: #6b7280;
+  --ce-string: #0f766e;
+  --ce-number: #b45309;
+  --ce-keyword: #7e22ce;
+  --ce-literal: #b91c1c;
+  --ce-function: #1d4ed8;
+  --ce-property: #0e7490;
+  --ce-builtin: #a16207;
+  --ce-regex: #be185d;
+  --ce-punct: #6b7280;
+
+  /* Shared metrics: the textarea and the highlight layer must agree
+   * exactly, or the caret drifts from the glyphs beneath it. */
+  --ce-font: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --ce-font-size: 13px;
+  --ce-line-height: 20px;
+  --ce-pad-y: 12px;
+  --ce-pad-x: 14px;
+  --ce-gutter-w: 3.5rem;
+}
+
+.code-editor {
+  position: relative;
+  border: 1px solid var(--ce-border);
+  border-radius: 0.5rem;
+  background: var(--ce-bg);
+  overflow: hidden;
+}
+
+/* The textarea as the markup ships it, before attach() runs -- and the
+ * permanent appearance if scripting is unavailable. Readable on its own:
+ * that is the bug this file exists to fix. */
+.code-editor-fallback {
+  display: block;
+  width: 100%;
+  height: var(--ce-height, 32rem);
+  margin: 0;
+  padding: var(--ce-pad-y) var(--ce-pad-x);
+  font: var(--ce-font-size) / var(--ce-line-height) var(--ce-font);
+  tab-size: 2;
+  white-space: pre;
+  color: var(--ce-fg);
+  -webkit-text-fill-color: var(--ce-fg);
+  background: var(--ce-bg);
+  border: 1px solid var(--ce-border);
+  border-radius: 0.5rem;
+  box-sizing: border-box;
+  resize: vertical;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ce-bg: #111827;
+    --ce-fg: #e5e7eb;
+    --ce-border: #374151;
+    --ce-gutter-bg: #0d1424;
+    --ce-gutter-fg: #6b7280;
+    --ce-selection: #1e40af;
+    --ce-comment: #8b9bb4;
+    --ce-string: #a5d6a7;
+    --ce-number: #f2b366;
+    --ce-keyword: #c792ea;
+    --ce-literal: #ff8a80;
+    --ce-function: #82aaff;
+    --ce-property: #80cbc4;
+    --ce-builtin: #ffcb6b;
+    --ce-regex: #f48fb1;
+    --ce-punct: #9ca3af;
+  }
+}
+
+.code-editor__scroll {
+  position: relative;
+  height: var(--ce-height, 32rem);
+  overflow: hidden;
+  display: flex;
+}
+
+/* Line numbers. Scrolled vertically in step with the text. */
+.code-editor__gutter {
+  flex: 0 0 var(--ce-gutter-w);
+  background: var(--ce-gutter-bg);
+  border-right: 1px solid var(--ce-border);
+  overflow: hidden;
+  user-select: none;
+}
+
+.code-editor__gutter-inner {
+  padding: var(--ce-pad-y) 0.5rem var(--ce-pad-y) 0;
+  font: var(--ce-font-size) / var(--ce-line-height) var(--ce-font);
+  color: var(--ce-gutter-fg);
+  text-align: right;
+  white-space: pre;
+}
+
+.code-editor__pane {
+  position: relative;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+/* The highlight layer and the textarea are stacked and share every metric
+ * that affects glyph position. */
+.code-editor__highlight,
+.code-editor__input {
+  margin: 0;
+  border: 0;
+  padding: var(--ce-pad-y) var(--ce-pad-x);
+  font: var(--ce-font-size) / var(--ce-line-height) var(--ce-font);
+  font-feature-settings: normal;
+  font-variant-ligatures: none;
+  letter-spacing: normal;
+  tab-size: 2;
+  white-space: pre;
+  word-wrap: normal;
+  overflow-wrap: normal;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+}
+
+.code-editor__highlight {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  color: var(--ce-fg);
+  background: transparent;
+  pointer-events: none;
+}
+
+.code-editor__input {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  resize: none;
+  background: transparent;
+  /* The glyphs come from the layer beneath; only the caret shows here. */
+  color: transparent;
+  caret-color: var(--ce-fg);
+  -webkit-text-fill-color: transparent;
+}
+
+.code-editor__input::selection {
+  background: var(--ce-selection);
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+.code-editor__input:focus {
+  outline: 2px solid #3b82f6;
+  outline-offset: -2px;
+}
+
+.tok-comment  { color: var(--ce-comment); font-style: italic; }
+.tok-string   { color: var(--ce-string); }
+.tok-number   { color: var(--ce-number); }
+.tok-keyword  { color: var(--ce-keyword); font-weight: 600; }
+.tok-literal  { color: var(--ce-literal); }
+.tok-function { color: var(--ce-function); }
+.tok-property { color: var(--ce-property); }
+.tok-builtin  { color: var(--ce-builtin); }
+.tok-regex    { color: var(--ce-regex); }
+.tok-punct    { color: var(--ce-punct); }
