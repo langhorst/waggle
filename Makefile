@@ -2,6 +2,7 @@
 # `make` (or `make help`) lists targets; `make check` is the pre-push gate.
 
 BIN     := bin/waggle
+SIMBIN  := bin/waggle-sim
 GO      := go
 PKGS    := ./...
 FUZZPKGS := ./internal/format/hl7v2 ./internal/format/astm ./internal/format/csvfmt ./internal/format/jsonfmt ./internal/format/xmlfmt
@@ -16,8 +17,9 @@ FUZZTIME ?= 30s
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-build: ## Build the waggle binary into bin/
+build: ## Build the waggle and waggle-sim binaries into bin/
 	$(GO) build -o $(BIN) ./cmd/waggle
+	$(GO) build -o $(SIMBIN) ./cmd/waggle-sim
 
 release: ## Build a stripped, trimmed release binary
 	$(GO) build -trimpath -ldflags '-s -w' -o $(BIN) ./cmd/waggle

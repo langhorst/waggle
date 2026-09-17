@@ -252,6 +252,35 @@ config file, the flags, or `$WAGGLE_TOKEN` / `$WAGGLE_USER` /
 config. A rejected credential says which kind was tried rather than just
 `401`.
 
+## Simulating feeds
+
+`waggle-sim` generates the traffic a hospital network's interfaces would,
+so a channel can be exercised without a real EMR:
+
+```sh
+waggle-sim -mllp 127.0.0.1:2575 -day-in 10m   # live, paced
+waggle-sim -dir ./in -days 3 -fast            # files, as fast as possible
+waggle-sim -corpus ./corpus -days 30 -fast    # a replayable corpus
+```
+
+`-day-in` sets how long one simulated day takes, so the same run works as a
+demo at ten minutes a day or a soak test at real time; `-fast` removes
+pacing entirely. The rate is pacing only -- a given `-seed` produces the
+same messages with the same timestamps at any speed, so a failure found
+overnight reproduces in milliseconds.
+
+It models one world (patients, encounters, finite beds) and renders feeds
+from it, rather than generating messages independently. A visit is admitted
+before it is transferred or discharged, a bed holds one patient, and the
+census the feed implies matches the census the model holds. ADT (HL7 2.5.1,
+A01/A02/A03/A08/A11) is the feed that exists today; orders and results are
+renderers over the same events. Identity is per-facility MRN plus an
+enterprise id, both sent in PID-3.
+
+All of it is invented: the names, addresses and provider ids are synthetic,
+and identifiers carry a facility-letter prefix no numeric MRN range can
+collide with.
+
 ## Configuration
 
 See `examples/`. One `daemon.yaml` plus one YAML file per channel;
