@@ -293,3 +293,50 @@ func TestEmissionFollowsSimulatedOrderAtAnyRate(t *testing.T) {
 		}
 	}
 }
+
+// The summary is what an operator reads in a terminal, so it must name the
+// patient and the visit, not just the trigger.
+func TestMessageSummaryNamesThePatient(t *testing.T) {
+	bed := &sim.Location{Facility: "MERCY", Unit: "3WEST", Room: "312", Bed: "B"}
+	prior := &sim.Location{Facility: "MERCY", Unit: "ED", Room: "104", Bed: "A"}
+	p := &sim.Patient{
+		MRN: "MERC0000042", Family: "THORNQUIST", Given: "IMOGEN", Sex: "F",
+		BirthDate: time.Date(1958, 7, 14, 0, 0, 0, 0, time.UTC),
+	}
+	enc := &sim.Encounter{
+		VisitNumber: "V000000123", Patient: p, Class: sim.ClassInpatient,
+		Location: bed, PriorLocation: prior,
+	}
+	m := sim.Message{
+		Feed: "adt", Trigger: "ADT^A02", ControlID: "SIM000000009",
+		Cause: sim.Event{
+			Kind: sim.EncounterTransferred, Patient: p, Encounter: enc,
+			From: prior, To: bed,
+		},
+	}
+	got := map[string]any{}
+	attrs := m.Summary()
+	for i := 0; i+1 < len(attrs); i += 2 {
+		got[attrs[i].(string)] = attrs[i+1]
+	}
+	for k, want := range map[string]any{
+		"feed": "adt", "trigger": "ADT^A02", "ctrl": "SIM000000009",
+		"mrn": "MERC0000042", "name": "THORNQUIST,IMOGEN", "dob": "19580714",
+		"sex": "F", "visit": "V000000123", "class": "I",
+		"loc": "3WEST^312^B^MERCY", "from": "ED^104^A^MERCY",
+	} {
+		if got[k] != want {
+			t.Errorf("summary[%s] = %v, want %v", k, got[k], want)
+		}
+	}
+}
+
+// A message with no domain objects behind it must still summarise rather
+// than panic: faults and future feeds can produce one.
+func TestMessageSummaryToleratesEmptyCause(t *testing.T) {
+	m := sim.Message{Feed: "adt", Trigger: "ADT^A01", ControlID: "X1"}
+	attrs := m.Summary()
+	if len(attrs) < 6 || len(attrs)%2 != 0 {
+		t.Fatalf("summary = %v", attrs)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -171,6 +172,7 @@ func (e *Engine) build(cfg *config.Channel) (*channel.Channel, error) {
 		Bus:        e.bus,
 		Log:        e.log,
 		MaxPending: cfg.MaxPending,
+		LogFields:  logFields(cfg.LogFields),
 	}
 	if e.store != nil {
 		ch.Queue = e.store
@@ -454,4 +456,22 @@ func (e *Engine) Shutdown() {
 			e.log.Error("channel failed to stop cleanly", "channel", m.cfg.ID, "error", err)
 		}
 	}
+}
+
+// logFields orders the configured labels so a channel's log lines keep a
+// stable shape: map iteration would shuffle them between messages.
+func logFields(m map[string]string) []channel.LogField {
+	if len(m) == 0 {
+		return nil
+	}
+	labels := make([]string, 0, len(m))
+	for label := range m {
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+	out := make([]channel.LogField, 0, len(labels))
+	for _, label := range labels {
+		out = append(out, channel.LogField{Label: label, Path: m[label]})
+	}
+	return out
 }

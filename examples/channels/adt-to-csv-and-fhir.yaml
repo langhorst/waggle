@@ -10,6 +10,15 @@ id: adt-to-csv-and-fhir
 name: ADT to CSV and FHIR
 retention: 5000
 
+# Label every log line about a message with the patient it concerns, so
+# this daemon's log lines up against the simulator's and the FHIR server's
+# without counting message numbers.
+logFields:
+  ctrl: "MSH-10"
+  mrn: "PID-3[1].1"
+  name: "PID-5.1"
+  trigger: "MSH-9.2"
+
 source:
   type: mllp-listener
   dataType: hl7v2

@@ -27,6 +27,10 @@ type Wiring struct {
 // slow sink slow the hospital down rather than accumulate in memory.
 type Runner struct {
 	Log *slog.Logger
+	// LogMessages writes a line per message as it goes to its sink. It is
+	// how a run is followed in a terminal, so it defaults on for the
+	// command; a long unpaced run should turn it off.
+	LogMessages bool
 
 	mu      sync.Mutex
 	wiring  []Wiring
@@ -86,6 +90,9 @@ func (r *Runner) Emit(ctx context.Context, ev Event) error {
 				out = next
 			}
 			for _, mm := range out {
+				if r.LogMessages {
+					r.Log.Info("sending", mm.Summary()...)
+				}
 				if err := w.Sink.Send(ctx, mm); err != nil {
 					return fmt.Errorf("%s sink: %w", w.Feed.Name(), err)
 				}

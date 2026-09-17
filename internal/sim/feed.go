@@ -153,3 +153,43 @@ type Fault interface {
 	// an empty slice drops it.
 	Apply(m Message) []Message
 }
+
+// Summary describes a message in the terms an operator watching a terminal
+// cares about: which patient, which visit, where they are.
+//
+// It reads the domain objects the message was rendered from rather than
+// re-parsing the wire bytes, so the log says what the simulation meant even
+// when a fault has since corrupted what it sent.
+func (m Message) Summary() []any {
+	attrs := []any{"feed", m.Feed, "trigger", m.Trigger, "ctrl", m.ControlID}
+
+	ev := m.Cause
+	if p := ev.Patient; p != nil {
+		attrs = append(attrs,
+			"mrn", p.MRN,
+			"name", p.Family+","+p.Given,
+			"dob", HL7Date(p.BirthDate),
+			"sex", p.Sex,
+		)
+	}
+	if enc := ev.Encounter; enc != nil {
+		attrs = append(attrs, "visit", enc.VisitNumber, "class", string(enc.Class))
+		if enc.Location != nil {
+			attrs = append(attrs, "loc", enc.Location.String())
+		}
+		if enc.DischargeDisposition != "" && ev.Kind == EncounterDischarged {
+			attrs = append(attrs, "disposition", enc.DischargeDisposition)
+		}
+	}
+	// A transfer is only legible with both ends of it.
+	if ev.From != nil {
+		attrs = append(attrs, "from", ev.From.String())
+	}
+	if o := ev.Order; o != nil {
+		attrs = append(attrs, "placer", o.PlacerNumber, "service", o.Code)
+	}
+	if r := ev.Result; r != nil {
+		attrs = append(attrs, "obs", r.Code, "value", r.Value, "status", string(r.Status))
+	}
+	return attrs
+}

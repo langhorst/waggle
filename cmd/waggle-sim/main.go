@@ -21,6 +21,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -47,14 +48,23 @@ func run(args []string) int {
 		startAt  = fs.String("start", "", "simulated start instant, RFC3339 (default: a fixed date, for reproducibility)")
 		ackTmo   = fs.Duration("ack-timeout", 30*time.Second, "how long to wait for an MLLP ACK")
 		tolerate = fs.Bool("tolerate-rejects", false, "keep running when the receiver rejects a message")
-		quiet    = fs.Bool("quiet", false, "only report the run summary")
+		quiet    = fs.Bool("quiet", false, "only report the run summary, no per-message lines")
+		logLevel = fs.String("log-level", "info", "debug, info, warn or error")
 	)
 	_ = fs.Parse(args)
 
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	if *quiet {
-		log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	level, err := parseLevel(*logLevel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 2
 	}
+	if *quiet {
+		level = slog.LevelWarn
+	}
+	// Times are the wall clock here, not the simulation's: the point of
+	// these lines is to follow a run in a terminal alongside the daemon's
+	// own log, and the message itself carries the simulated instant.
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
 	cfg := sim.DefaultConfig()
 	cfg.Seed = *seed
@@ -62,7 +72,8 @@ func run(args []string) int {
 		cfg.ArrivalsPerDay = *arrivals
 	}
 	if *startAt != "" {
-		t, err := time.Parse(time.RFC3339, *startAt)
+		t, perr := time.Parse(time.RFC3339, *startAt)
+		err = perr
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "parsing -start: %v\n", err)
 			return 2
@@ -107,6 +118,10 @@ func run(args []string) int {
 	clock := simtime.New(cfg.StartAt, scale, nil)
 	sched := simtime.NewScheduler(clock)
 	runner := sim.NewRunner(log)
+	// A line per message is what makes a paced run followable. It is off
+	// when quiet, and worth turning off for a long unpaced run: -fast
+	// -days 30 is a hundred thousand lines.
+	runner.LogMessages = !*quiet
 
 	adtCfg := adt.DefaultConfig()
 	runner.Wire(sim.Wiring{
@@ -165,4 +180,20 @@ func run(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// parseLevel maps a level name to its slog level.
+func parseLevel(name string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info", "":
+		return slog.LevelInfo, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("unknown log level %q (debug, info, warn, error)", name)
+	}
 }
