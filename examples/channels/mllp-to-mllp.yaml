@@ -1,0 +1,30 @@
+# ORM to EMR
+id: mllp-to-mllp
+name: HL7 (MLLP) → HL7 (MLLP)
+source:
+  type: mllp-listener
+  dataType: hl7v2
+  settings:
+    addr: ":6673"
+    ackMode: immediate
+transformers:
+destinations:
+  - id: to-emr
+    dataType: hl7v2
+    adapter:
+      type: mllp-sender
+      settings:
+        addr: "127.0.0.1:6674"
+    queue:
+      maxAttempts: 10
+      retryInterval: 1s
+  - id: to-file
+    dataType: csv
+    transformers: [scripts/to-csv.js]
+    adapter:
+      type: file-writer
+      settings: { dir: out/csv, pattern: "{ts}-{id}.csv" }
+  - id: hl7-archive
+    adapter:
+      type: file-writer
+      settings: { dir: out/archive, pattern: "{ts}-{id}.hl7" }
