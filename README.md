@@ -252,6 +252,32 @@ config file, the flags, or `$WAGGLE_TOKEN` / `$WAGGLE_USER` /
 config. A rejected credential says which kind was tried rather than just
 `401`.
 
+## A worked channel: ADT to CSV and FHIR
+
+`examples/channels/adt-to-csv-and-fhir.yaml` is the end-to-end workflow:
+an MLLP listener takes an ADT feed and fans each message out to a single
+CSV (`id,last_name,first_name,dob`) and to a FHIR server as a Patient
+resource. Point the simulator at it and the two should agree:
+
+```sh
+waggle daemon -config daemon.yaml
+waggle-sim -mllp 127.0.0.1:2575 -day-in 10m
+
+tail -f out/patients.csv
+cut -d, -f1 out/patients.csv | tail -n +2 | sort -u | wc -l   # distinct MRNs
+curl -s "$FHIR_BASE/Patient?_count=0" | jq .total             # Patients stored
+```
+
+The CSV logs a row per message, so an A08 that corrects a name appears as a
+second row; the FHIR side writes `PUT [base]/Patient/<mrn>`, so the same
+MRN is one resource however many messages arrive for it. The two counts
+therefore reconcile as distinct-MRNs against Patients, not rows against
+Patients.
+
+The listener uses `ackMode: destination`, so the MLLP ACK is held until both
+destinations have accepted. A NAK back to the simulator means the data
+genuinely did not land.
+
 ## Simulating feeds
 
 `waggle-sim` generates the traffic a hospital network's interfaces would,

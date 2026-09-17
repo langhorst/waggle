@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -325,6 +327,125 @@ func TestReaderRestart(t *testing.T) {
 		}
 		if err := r.Stop(); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+// Append mode: one shared file, a header written once, and a line per
+// message -- what a destination needs to produce a reviewable CSV.
+func TestWriterAppendMode(t *testing.T) {
+	dir := t.TempDir()
+	newWriter := func() *Writer {
+		w, err := NewWriter(map[string]any{
+			"dir": dir, "file": "patients.csv",
+			"header": "id,last_name,first_name,dob",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Open(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		return w
+	}
+
+	w := newWriter()
+	for _, row := range []string{"MRN1,DOE,JOHN,19750402\n", "MRN2,ROE,JANE,19801115\n"} {
+		if err := w.Send(context.Background(), []byte(row), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopening must continue the file, not repeat the header.
+	w2 := newWriter()
+	if err := w2.Send(context.Background(), []byte("MRN3,POE,SAM,19660301\n"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := w2.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "patients.csv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "id,last_name,first_name,dob\nMRN1,DOE,JOHN,19750402\nMRN2,ROE,JANE,19801115\nMRN3,POE,SAM,19660301\n"
+	if string(raw) != want {
+		t.Errorf("csv =\n%q\nwant\n%q", raw, want)
+	}
+}
+
+// A payload that already ends in a newline must not gain a second one, and
+// one that does not must gain its first: a CSV is one record per line.
+func TestWriterAppendNormalisesLineEndings(t *testing.T) {
+	dir := t.TempDir()
+	w, err := NewWriter(map[string]any{"dir": dir, "file": "out.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, payload := range []string{"a\n", "b", "c\r\n", "d\n\n"} {
+		if err := w.Send(context.Background(), []byte(payload), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = w.Close()
+	raw, _ := os.ReadFile(filepath.Join(dir, "out.txt"))
+	if string(raw) != "a\nb\nc\nd\n" {
+		t.Errorf("got %q, want %q", raw, "a\nb\nc\nd\n")
+	}
+}
+
+func TestWriterAppendConfigConflicts(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := NewWriter(map[string]any{"dir": dir, "file": "x.csv", "pattern": "{id}.out"}); err == nil {
+		t.Error("file and pattern together should be rejected")
+	}
+	if _, err := NewWriter(map[string]any{"dir": dir, "header": "a,b"}); err == nil {
+		t.Error("a header without append mode should be rejected")
+	}
+	if _, err := NewWriter(map[string]any{"dir": dir, "file": "sub/x.csv"}); err == nil {
+		t.Error("a file with a path separator should be rejected")
+	}
+}
+
+// Concurrent sends must not interleave partial lines.
+func TestWriterAppendIsSerialized(t *testing.T) {
+	dir := t.TempDir()
+	w, err := NewWriter(map[string]any{"dir": dir, "file": "rows.csv"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			line := strings.Repeat("x", 200) + "," + strconv.Itoa(i)
+			if err := w.Send(context.Background(), []byte(line), nil); err != nil {
+				t.Error(err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	_ = w.Close()
+
+	raw, _ := os.ReadFile(filepath.Join(dir, "rows.csv"))
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) != 50 {
+		t.Fatalf("got %d lines, want 50", len(lines))
+	}
+	for _, l := range lines {
+		if len(l) < 202 || !strings.HasPrefix(l, strings.Repeat("x", 200)) {
+			t.Fatalf("interleaved line: %q", l)
 		}
 	}
 }

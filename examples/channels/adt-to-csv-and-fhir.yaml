@@ -1,0 +1,58 @@
+# ADT intake, fanned out to a CSV for eyeballing and a FHIR server for
+# querying. Point waggle-sim at the listener below and the same patients
+# should appear in both:
+#
+#   waggle-sim -mllp 127.0.0.1:2575 -day-in 10m
+#
+#   tail -f out/patients.csv
+#   curl "$FHIR_BASE/Patient?_count=5" | jq '.total'
+id: adt-to-csv-and-fhir
+name: ADT to CSV and FHIR
+retention: 5000
+
+source:
+  type: mllp-listener
+  dataType: hl7v2
+  settings:
+    addr: "127.0.0.1:2575"
+    # destination ack holds the MLLP ACK until both destinations have
+    # accepted the message, so a NAK back to the simulator means the data
+    # really did not land. immediate would ack before either had run.
+    ackMode: destination
+    # Bounds how long the ACK is held while the destinations work; on expiry
+    # the sender gets the fallback (AE) rather than waiting forever.
+    holdTimeout: 30s
+
+# Only messages that carry patient demographics are worth fanning out.
+filter: scripts/has-patient.js
+
+destinations:
+  # 1. A single CSV to read by hand: id, last name, first name, date of birth.
+  - id: csv
+    dataType: csv
+    transformers: [scripts/to-patient-csv.js]
+    adapter:
+      type: file-writer
+      settings:
+        dir: out
+        file: patients.csv
+        header: "id,last_name,first_name,dob"
+
+  # 2. The same demographics as a FHIR Patient, written by conditional
+  #    update so one MRN is one Patient resource however many ADT messages
+  #    arrive for it.
+  - id: fhir
+    dataType: json
+    transformers: [scripts/to-fhir-patient.js]
+    adapter:
+      type: http-sender
+      settings:
+        url: "http://127.0.0.1:8080/fhir/"
+        method: PUT
+        contentType: "application/fhir+json"
+        headers:
+          Accept: "application/fhir+json"
+        timeout: 20s
+    queue:
+      maxAttempts: 5
+      retryInterval: 5s
