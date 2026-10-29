@@ -391,3 +391,7 @@ Package map: `internal/message` (tree, states, diff) · `internal/format/*`
 Delivery is at-least-once: a crash between a successful send and its
 acknowledgment in the store can re-send one message on restart. Design
 receivers idempotent (HL7 receivers generally are, keyed on MSH-10).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
