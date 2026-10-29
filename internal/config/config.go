@@ -6,6 +6,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -32,6 +33,30 @@ type Daemon struct {
 	HotReload bool `yaml:"hotReload"`
 	// Auth protects the HTTP API and web UI.
 	Auth Auth `yaml:"auth"`
+	// LogLevel is debug, info (the default), warn or error.
+	//
+	// info logs a line per message through the pipeline, which is what
+	// makes a channel followable in a terminal while it runs; a busy
+	// production feed will want warn. debug adds the parse, filter and
+	// transform steps within each message.
+	LogLevel string `yaml:"logLevel"`
+}
+
+// Level maps LogLevel onto its slog level, reporting an unusable setting
+// rather than silently picking one.
+func (d *Daemon) Level() (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(d.LogLevel)) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "", "info":
+		return slog.LevelInfo, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("logLevel %q is not debug, info, warn or error", d.LogLevel)
+	}
 }
 
 // Auth is the HTTP API/web UI credential policy. With no credentials
@@ -121,6 +146,9 @@ func (d *Daemon) Validate() error {
 	if d.Auth.BasicPassword != "" && d.Auth.BasicUser == "" {
 		return fmt.Errorf("auth: basicPassword requires basicUser")
 	}
+	if _, err := d.Level(); err != nil {
+		return err
+	}
 	// No credentials at all is refused everywhere, not just off-loopback:
 	// the API rejects every request when nothing is configured, so serving
 	// that way is a lockout rather than an open door. Saying so at startup
@@ -162,11 +190,17 @@ type Channel struct {
 	// MaxPending bounds messages accepted but not yet processed; when the
 	// buffer is full the source blocks (and its transport ACK waits).
 	// Default 256.
-	MaxPending   int           `yaml:"maxPending"`
-	Source       Source        `yaml:"source"`
-	Filter       string        `yaml:"filter"`       // path to .js Message Filter
-	Transformers []string      `yaml:"transformers"` // ordered .js Message Translator chain
-	Destinations []Destination `yaml:"destinations"`
+	MaxPending int `yaml:"maxPending"`
+	// LogFields names values to pull out of each message and attach to its
+	// log lines, as label -> path in the source data type's dialect, e.g.
+	// {mrn: "PID-3[1].1", ctrl: "MSH-10"}. Without them a log says only
+	// which message number moved, which is hard to line up against another
+	// system's log; with them every line names the patient.
+	LogFields    map[string]string `yaml:"logFields"`
+	Source       Source            `yaml:"source"`
+	Filter       string            `yaml:"filter"`       // path to .js Message Filter
+	Transformers []string          `yaml:"transformers"` // ordered .js Message Translator chain
+	Destinations []Destination     `yaml:"destinations"`
 
 	// Path is where this channel was loaded from (set by LoadChannels; not
 	// part of the YAML).

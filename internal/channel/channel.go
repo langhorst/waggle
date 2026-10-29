@@ -118,6 +118,9 @@ type Channel struct {
 	// MaxPending bounds messages recorded but not yet processed. Zero
 	// means DefaultMaxPending.
 	MaxPending int
+	// LogFields are values lifted out of each message and attached to its
+	// log lines, in the order they should appear.
+	LogFields []LogField
 
 	// lifecycleMu serializes Start/Pause/Resume/Stop. It is held across
 	// adapter calls; mu never is. Inbound adapters call deliver from their
@@ -136,6 +139,12 @@ type Channel struct {
 	pending  chan *pendingMessage
 	pipeDone chan struct{}
 	inflight sync.WaitGroup
+}
+
+// LogField is one labelled path whose value joins a message's log lines.
+type LogField struct {
+	Label string
+	Path  string
 }
 
 // DefaultMaxPending is the intake buffer size when MaxPending is unset.
@@ -396,6 +405,19 @@ func (c *Channel) handoff(ctx context.Context, pending chan *pendingMessage, m *
 // decision for destination-ACK sources.
 func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDecision {
 	log := c.Log.With("channel", c.ID, "message", m.ID)
+	started := time.Now()
+
+	// One line as each message arrives. Without it a healthy channel is
+	// silent, and an operator watching a terminal cannot tell the
+	// difference between working and hung.
+	received := []any{"bytes", len(m.Raw), "type", c.InType.Name()}
+	if from := m.Meta[metakey.SourceRemote]; from != "" {
+		received = append(received, "from", from)
+	}
+	if file := m.Meta[metakey.SourceFile]; file != "" {
+		received = append(received, "file", file)
+	}
+	log.Info("message received", received...)
 
 	tree, err := c.InType.Parse(m.Raw)
 	if err != nil {
@@ -403,6 +425,13 @@ func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDe
 		return adapter.AckDecision{Code: "AE", Text: err.Error()}
 	}
 	m.Tree = tree
+
+	// Now that the message is parsed, label its log lines with whatever the
+	// channel asked for, so every later line about this message names the
+	// patient rather than a message number.
+	if len(c.LogFields) > 0 {
+		log = log.With(c.messageLabels(m)...)
+	}
 
 	if c.Filter != nil {
 		keep, err := c.Filter(m)
@@ -417,6 +446,7 @@ func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDe
 				return storeFailure(err)
 			}
 			c.publishMessage(m.ID, message.StateFiltered, "")
+			log.Info("message filtered", "took", took(started))
 			return adapter.AckDecision{Code: "AA"}
 		}
 	}
@@ -443,12 +473,14 @@ func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDe
 		return storeFailure(err)
 	}
 	c.publishMessage(m.ID, message.StateTransformed, "")
+	log.Debug("message transformed", "type", outType.Name(), "bytes", len(transformed), "took", took(started))
 
 	// Recipient List fan-out.
 	decision := adapter.AckDecision{Code: "AA"}
 	for _, d := range c.Destinations {
+		dstStarted := time.Now()
 		if err := c.sendTo(ctx, d, m); err != nil {
-			log.Warn("destination delivery failed", "destination", d.ID, "error", err)
+			log.Warn("destination delivery failed", "destination", d.ID, "took", took(dstStarted), "error", err)
 			if d.WaitForAck && decision.Code == "AA" {
 				var rej *Rejection
 				switch {
@@ -460,14 +492,50 @@ func (c *Channel) process(ctx context.Context, m *message.Message) adapter.AckDe
 					decision = adapter.AckDecision{Code: "AE", Text: fmt.Sprintf("destination %s: %v", d.ID, err)}
 				}
 			}
+			continue
 		}
+		// Queued destinations have handed off rather than delivered; the
+		// queue worker logs the delivery itself when it happens.
+		outcome := "sent"
+		if c.Queue != nil && !d.WaitForAck {
+			outcome = "queued"
+		}
+		log.Info("destination "+outcome, "destination", d.ID, "took", took(dstStarted))
 	}
+	log.Info("message processed", "destinations", len(c.Destinations), "ack", decision.Code, "took", took(started))
 	// An explicit response.setAck, from the channel chain or any
 	// destination chain, wins over the automatic decision.
 	if m.AckCode != "" {
 		decision = adapter.AckDecision{Code: m.AckCode, Text: m.AckText}
 	}
 	return decision
+}
+
+// messageLabels resolves the channel's LogFields against a parsed message.
+// A path that matches nothing is skipped: a log line is not the place to
+// report a configuration mistake, and half a label is worse than none.
+func (c *Channel) messageLabels(m *message.Message) []any {
+	out := make([]any, 0, len(c.LogFields)*2)
+	for _, f := range c.LogFields {
+		nodes, err := c.InType.Resolve(m.Tree, f.Path)
+		if err != nil || len(nodes) == 0 {
+			continue
+		}
+		if v := c.InType.Value(m.Tree, nodes[0]); v != "" {
+			out = append(out, f.Label, v)
+		}
+	}
+	return out
+}
+
+// took renders an elapsed duration at a precision worth reading in a log:
+// sub-millisecond work is noise, and a slow destination is the point.
+func took(start time.Time) time.Duration {
+	d := time.Since(start)
+	if d < time.Millisecond {
+		return d.Round(10 * time.Microsecond)
+	}
+	return d.Round(time.Millisecond)
 }
 
 // storeFailure is the ACK for a message whose outcome could not be

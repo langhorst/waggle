@@ -307,6 +307,39 @@ All of it is invented: the names, addresses and provider ids are synthetic,
 and identifiers carry a facility-letter prefix no numeric MRN range can
 collide with.
 
+## Watching a run
+
+Both commands log a line per message at `info`, which is the default, so a
+paced run is followable in a terminal without extra configuration.
+
+The daemon's level is `logLevel` in `daemon.yaml` (`debug`, `info`, `warn`,
+`error`), overridable with `waggle daemon -log-level`. `info` logs each
+message received, each destination outcome and each queued delivery;
+`debug` adds the transform step; `warn` leaves only failures, which is what
+a busy production feed wants. `waggle-sim` takes the same `-log-level`, and
+`-quiet` drops it to warnings (worth doing for `-fast -days 30`, which is
+otherwise a hundred thousand lines).
+
+A channel can label its log lines with values from the message itself, so
+the daemon's log lines up against whatever is on the other end:
+
+```yaml
+logFields:
+  ctrl: "MSH-10"
+  mrn: "PID-3[1].1"
+  trigger: "MSH-9.2"
+```
+
+```
+# waggle-sim
+msg=sending feed=adt trigger=ADT^A01 ctrl=SIM000000001 mrn=MERC0000001 name=MERRIWEATHER,JASPER ...
+# waggle
+msg="destination queued" message=1 ctrl=SIM000000001 mrn=MERC0000001 destination=fhir took=800µs
+msg=delivered destination=fhir message=1 bytes=620 took=2ms
+```
+
+A path that matches nothing is skipped rather than logged empty.
+
 ## Configuration
 
 See `examples/`. One `daemon.yaml` plus one YAML file per channel;

@@ -175,8 +175,12 @@ func dialableAddr(listen string) string {
 func runDaemon(args []string) int {
 	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 	configPath := fs.String("config", "daemon.yaml", "path to daemon config")
+	logLevel := fs.String("log-level", "", "debug, info, warn or error (overrides the config's logLevel)")
 	_ = fs.Parse(args)
 
+	// Until the config is read there is nowhere to put a level, so config
+	// failures are reported at the default and the real logger replaces
+	// this one as soon as there is something to configure it from.
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	slog.SetDefault(log)
 
@@ -185,6 +189,16 @@ func runDaemon(args []string) int {
 		log.Error("loading daemon config", "error", err)
 		return 1
 	}
+	if *logLevel != "" {
+		cfg.LogLevel = *logLevel
+	}
+	level, err := cfg.Level()
+	if err != nil {
+		log.Error("log level", "error", err)
+		return 1
+	}
+	log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	slog.SetDefault(log)
 	channels, err := config.LoadChannels(cfg.ChannelsDir)
 	if err != nil {
 		log.Error("loading channels", "error", err)

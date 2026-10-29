@@ -121,6 +121,7 @@ func (w *Worker) attempt(ctx context.Context, log *slog.Logger, item *store.Queu
 	meta[metakey.MessageID] = fmt.Sprintf("%d", item.MessageID)
 	meta[metakey.ChannelID] = w.ChannelID
 	meta[metakey.DestinationID] = w.DestID
+	started := time.Now()
 	err := w.Adapter.Send(ctx, item.Payload, meta)
 	switch {
 	case err == nil:
@@ -129,6 +130,15 @@ func (w *Worker) attempt(ctx context.Context, log *slog.Logger, item *store.Queu
 			return
 		}
 		w.publish(item.MessageID, message.StateSent)
+		// The pipeline only saw this delivery queued, so without a line
+		// here a queued destination succeeds invisibly -- and a queued
+		// destination is exactly the one an operator most wants to watch,
+		// because it is the one that talks to another system.
+		attrs := []any{"message", item.MessageID, "bytes", len(item.Payload), "took", time.Since(started).Round(time.Millisecond)}
+		if item.Attempts > 0 {
+			attrs = append(attrs, "attempt", item.Attempts+1)
+		}
+		log.Info("delivered", attrs...)
 
 	case adapter.IsPermanent(err):
 		log.Warn("permanent rejection, dead-lettering", "message", item.MessageID, "error", err)
