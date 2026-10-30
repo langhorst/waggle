@@ -27,6 +27,9 @@ review, kept as the rationale for much of the current structure.
   ```
 
 - `make vulncheck` needs network access to vuln.go.dev.
+- Releases are annotated `vX.Y.Z` tags on `main`. The Go toolchain stamps
+  the version from git (see the README's Versions and releases), so never
+  set it with `-ldflags -X`.
 - Keep a PR to one change. A bug found along the way gets its own PR or
   issue unless the change cannot pass without fixing it.
 

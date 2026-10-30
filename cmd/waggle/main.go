@@ -5,6 +5,8 @@
 // Usage:
 //
 //	waggle [daemon] [-config daemon.yaml]
+//	waggle tui [-config daemon.yaml]
+//	waggle version
 package main
 
 import (
@@ -27,6 +29,7 @@ import (
 	"github.com/langhorst/waggle/internal/script"
 	"github.com/langhorst/waggle/internal/store"
 	"github.com/langhorst/waggle/internal/tui"
+	"github.com/langhorst/waggle/internal/version"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -49,14 +52,18 @@ func main() {
 	if len(args) > 0 && args[0] != "" && args[0][0] != '-' {
 		cmd = args[0]
 		args = args[1:]
+	} else if len(args) > 0 && (args[0] == "-version" || args[0] == "--version") {
+		cmd = "version"
 	}
 	switch cmd {
 	case "daemon":
 		os.Exit(runDaemon(args))
 	case "tui":
 		os.Exit(runTUI(args))
+	case "version":
+		fmt.Println("waggle " + version.Get().String())
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q (expected: daemon, tui)\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown command %q (expected: daemon, tui, version)\n", cmd)
 		os.Exit(2)
 	}
 }
@@ -199,6 +206,8 @@ func runDaemon(args []string) int {
 	}
 	log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(log)
+	build := version.Get()
+	log.Info("waggle starting", "version", build.Version, "go", build.GoVersion)
 	channels, err := config.LoadChannels(cfg.ChannelsDir)
 	if err != nil {
 		log.Error("loading channels", "error", err)

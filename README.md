@@ -394,6 +394,26 @@ Delivery is at-least-once: a crash between a successful send and its
 acknowledgment in the store can re-send one message on restart. Design
 receivers idempotent (HL7 receivers generally are, keyed on MSH-10).
 
+## Versions and releases
+
+`waggle version` (or `waggle --version`) prints the build, the daemon logs
+it at startup, and `GET /api/status` reports it under `build`:
+
+```
+waggle v0.1.0 (commit 016fe9b6bff3, 2026-10-30T05:34:40Z, go1.27.3)
+```
+
+Nothing is stamped by hand. The Go toolchain records the version from git
+when it builds from a checkout: a build at a tag reports the tag, any other
+commit a pseudo-version naming it (`v0.1.1-0.20261030120000-abcdef123456`),
+and uncommitted changes add `+dirty`. A build without git information, from
+a source archive for example, reports `(devel)`.
+
+A release is an annotated `vX.Y.Z` tag on `main`, published as a GitHub
+release whose generated notes list the PRs merged since the previous tag.
+Versions stay below v1.0.0 while the configuration format and the API may
+still change.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

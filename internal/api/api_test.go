@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -164,6 +165,9 @@ func TestStatusAndChannels(t *testing.T) {
 	h.decode(raw, &status)
 	if status["channels"].(float64) != 1 || status["channelsRunning"].(float64) != 1 {
 		t.Errorf("status = %v", status)
+	}
+	if build, _ := status["build"].(map[string]any); build == nil || build["version"] == "" || build["goVersion"] != runtime.Version() {
+		t.Errorf("status build = %v", status["build"])
 	}
 
 	code, raw = h.do("GET", "/api/channels", "")
