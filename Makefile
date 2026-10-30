@@ -8,11 +8,15 @@ PKGS    := ./...
 FUZZPKGS := ./internal/format/hl7v2 ./internal/format/astm ./internal/format/csvfmt ./internal/format/jsonfmt ./internal/format/xmlfmt
 BENCHPKGS := ./internal/format/hl7v2 ./internal/channel
 FUZZTIME ?= 30s
+# govulncheck must be built with a Go at least as new as the code it reads,
+# and `go run pkg@version` picks its own toolchain, so vulncheck pins it to
+# the module's.
+VULNCHECK := golang.org/x/vuln/cmd/govulncheck@v1.9.0
 
 .DEFAULT_GOAL := help
 
 .PHONY: help build release run tui test test-race cover bench fuzz \
-        fmt fmt-check vet tidy-check golangci lint check clean
+        fmt fmt-check vet tidy-check golangci lint check vulncheck clean
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -71,6 +75,9 @@ golangci: ## Run golangci-lint (install: https://golangci-lint.run/docs/welcome/
 lint: fmt-check vet tidy-check golangci ## Formatting check + vet + tidy + golangci-lint
 
 check: lint test-race ## The pre-push gate: lint + race tests
+
+vulncheck: ## Report known vulnerabilities in code waggle calls (needs network)
+	GOTOOLCHAIN=$$($(GO) env GOVERSION) $(GO) run $(VULNCHECK) $(PKGS)
 
 clean: ## Remove build artifacts and example runtime state
 	rm -rf bin examples/data examples/out

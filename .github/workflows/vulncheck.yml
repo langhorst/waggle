@@ -1,0 +1,28 @@
+name: Vulnerability scan
+
+# Separate from CI so the weekly run repeats only the scan: new advisories
+# are published between changes, and a dependency nobody touched can become
+# vulnerable.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: make vulncheck
+        run: make vulncheck

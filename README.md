@@ -374,6 +374,7 @@ make test     # plain test run (unit, functional, E2E — no network needed)
 make cover    # race tests with a coverage summary
 make fuzz     # 30s of parser fuzzing per format (FUZZTIME=2m make fuzz for longer)
 make bench    # parser + pipeline benchmarks
+make vulncheck # known vulnerabilities in reachable code (govulncheck; needs network)
 ```
 
 `make help` lists everything; the plain `go test ./...` / `go vet ./...`
