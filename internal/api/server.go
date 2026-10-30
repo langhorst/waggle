@@ -448,7 +448,7 @@ func (s *Server) handleScriptRead(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // confined by confineScriptPath
 	if err != nil {
 		if os.IsNotExist(err) {
 			s.writeError(w, http.StatusNotFound, errors.New("script not found"))
@@ -458,7 +458,7 @@ func (s *Server) handleScriptRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	_, _ = w.Write(raw)
+	_, _ = w.Write(raw) //nolint:gosec // an operator script served as JavaScript, never as HTML
 }
 
 // maxScriptSize bounds a PUT /api/scripts body.
@@ -509,7 +509,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	cleanup := func() { os.Remove(tmpName) }
+	cleanup := func() { os.Remove(tmpName) } //nolint:gosec // a temp file beside a confined path
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		cleanup()
@@ -524,7 +524,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		cleanup()
 		return err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := os.Rename(tmpName, path); err != nil { //nolint:gosec // callers pass a confined path
 		cleanup()
 		return err
 	}

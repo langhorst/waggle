@@ -50,7 +50,8 @@ linters:
         - G404 # math/rand is fine for retry jitter
   exclusions:
     rules:
-      - path: _test\.go
+      # Test code and the shared test harness it uses.
+      - path: (_test\.go|internal/testutil/)
         linters:
           - errcheck
           - gosec

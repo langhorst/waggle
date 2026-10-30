@@ -378,8 +378,9 @@ make bench    # parser + pipeline benchmarks
 
 `make help` lists everything; the plain `go test ./...` / `go vet ./...`
 commands behind these targets work as ever. `make lint` needs
-[golangci-lint](https://golangci-lint.run/docs/welcome/install/) on the
-path; its configuration lives in `.golangci.yml`.
+[golangci-lint](https://golangci-lint.run/docs/welcome/install/) v2.15.0 or
+newer on the path (the version CI uses; it must be built with Go 1.27 or
+later to lint this module); its configuration lives in `.golangci.yml`.
 
 Package map: `internal/message` (tree, states, diff) · `internal/format/*`
 (data types) · `internal/adapter/*` (Channel Adapters + registry) ·
