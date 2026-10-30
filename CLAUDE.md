@@ -104,8 +104,11 @@ review, kept as the rationale for much of the current structure.
 
 - In `go.mod`, the `go` line is the language version and sets the GODEBUG
   defaults; the `toolchain` line pins the Go that builds and tests. Raising
-  the `go` line is a deliberate change in its own PR, never a side effect
-  of `go get`: check `git diff go.mod` after adding or updating a module.
+  the `go` line changes runtime behavior, so it is never a side effect of
+  your own `go get`: check `git diff go.mod` after adding or updating a
+  module. When a Dependabot PR raises it because a dependency requires the
+  newer Go, read the GODEBUG changes in the release notes of each Go
+  version it moves past before merging.
 - Dependabot opens grouped weekly PRs and `govulncheck` runs weekly. When
   it flags the standard library, bump the toolchain with
   `go get toolchain@go1.N.P`.
