@@ -137,7 +137,7 @@ func BuildNetwork(cfg Config) *Network {
 			u := &Unit{Facility: fc.Code, Name: uc.Name, Kind: uc.Kind}
 			for i := 0; i < uc.Beds; i++ {
 				room := fmt.Sprintf("%d", 100+(i%rooms)+1)
-				bed := string(rune('A' + i/rooms))
+				bed := string(rune('A' + i/rooms)) //nolint:gosec // beds per room is a handful
 				u.Beds = append(u.Beds, &Location{
 					Facility: fc.Code, Unit: uc.Name, Room: room, Bed: bed,
 				})

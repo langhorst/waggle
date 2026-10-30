@@ -132,7 +132,7 @@ func (s *Scheduler) sleepUntil(ctx context.Context, t time.Time) error {
 		return err
 	case <-s.wake:
 		cancel()
-		<-done
+		<-done //nolint:errcheck // the sleeper returns our own cancel; this only waits for it to exit
 		return ctx.Err()
 	}
 }

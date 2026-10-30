@@ -305,7 +305,7 @@ func (s *Server) actionReplay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if newID != 0 {
-		fmt.Fprintf(w, `<span class="text-sm text-green-600 dark:text-green-400">replayed as <a class="underline" href="/messages/%d">#%d</a></span>`, newID, newID)
+		fmt.Fprintf(w, `<span class="text-sm text-green-600 dark:text-green-400">replayed as <a class="underline" href="/messages/%d">#%d</a></span>`, newID, newID) //nolint:gosec // only integers are formatted
 		return
 	}
 	fmt.Fprint(w, `<span class="text-sm text-green-600 dark:text-green-400">requeued</span>`)
@@ -433,7 +433,7 @@ func (s *Server) pageEditor(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // confined by confineScriptPath
 	if err != nil {
 		http.NotFound(w, r)
 		return
