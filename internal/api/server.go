@@ -22,6 +22,7 @@ import (
 	"github.com/langhorst/waggle/internal/message"
 	"github.com/langhorst/waggle/internal/script"
 	"github.com/langhorst/waggle/internal/store"
+	"github.com/langhorst/waggle/internal/version"
 )
 
 // Server wires the engine into HTTP handlers.
@@ -162,6 +163,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"uptimeSeconds":   int(time.Since(s.started).Seconds()),
 		"channels":        len(channels),
 		"channelsRunning": running,
+		"build":           version.Get(),
 	})
 }
 
