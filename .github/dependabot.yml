@@ -1,0 +1,25 @@
+# Weekly dependency updates, grouped so a normal week is one PR per
+# ecosystem. Major Go module upgrades arrive as their own PRs, since they
+# can change APIs.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+    groups:
+      go-modules:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      github-actions:
+        patterns: ["*"]
