@@ -381,7 +381,10 @@ func TestInsertCountTriggersPrune(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
 	s.SetRetention("c1", 5)
-	for i := 0; i < pruneCheckEvery+1; i++ {
+	// Exactly pruneCheckEvery, so the triggering insert is the last one. One
+	// more could land after the sweep, leaving six rows and nothing to fire
+	// another sweep before the deadline.
+	for i := 0; i < pruneCheckEvery; i++ {
 		record(t, s, "c1", "m")
 	}
 	deadline := time.Now().Add(5 * time.Second)
